@@ -6,7 +6,7 @@ async function main() {
   const agent = new Agent();
 
   const result = await agent.run(
-    "Run npm run build and tell me whether the project builds successfully."
+    "Create a file called hello.txt containing Hello World"
   );
 
   console.log("\nAgent:");

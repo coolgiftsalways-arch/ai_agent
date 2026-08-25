@@ -1,7 +1,7 @@
 import { askOllama } from "../ollama/OllamaClient.js";
 import { FileTool } from "../tools/FileTool.js";
-import { TerminalTool } from "../tools/TerminalTool.js";
 import type { Tool } from "../tools/Tool.js";
+import { TerminalTool } from "../tools/TerminalTool.js";
 
 type AgentDecision =
   | {
@@ -25,70 +25,86 @@ export class Agent {
   }
 
   async run(userInput: string): Promise<string> {
-    const toolDescriptions = this.tools
-      .map(
-        (tool) =>
-          `Tool: ${tool.name}\nDescription: ${tool.description}`
-      )
-      .join("\n\n");
-
     const prompt = `
-You are a local AI coding agent.
+You are an AI agent that can perform actions inside a computer project.
 
-You receive a user's request and decide whether to answer directly
-or use one of your available tools.
+User request:
+"${userInput}"
 
 Available tools:
 
-${toolDescriptions}
+1. file
 
-FILE TOOL:
+Purpose:
+Create, read, write, and list files.
 
-Write a file:
+Create/write:
 {
   "action": "write",
-  "path": "hello.txt",
-  "content": "Hello World"
+  "path": "filename.txt",
+  "content": "text"
 }
 
-Read a file:
+Read:
 {
   "action": "read",
-  "path": "hello.txt"
+  "path": "filename.txt"
 }
 
-List files:
+List:
 {
   "action": "list",
   "path": "."
 }
 
-TERMINAL TOOL:
 
-Run a command:
+2. terminal
+
+Purpose:
+Run commands inside the current project workspace.
+
+Example:
 {
   "command": "npm run build"
 }
 
-USER REQUEST:
+IMPORTANT RULES:
 
-${userInput}
+1. If the user asks you to CREATE, WRITE, READ, LIST, RUN, CHECK, TEST, BUILD, INSTALL, or EXECUTE something that requires interacting with the project, YOU MUST USE A TOOL.
 
-RULES:
+2. If the user asks you to check whether the TypeScript project builds successfully, use:
 
-1. If the user asks you to create, write, read, or list files, use the file tool.
+{
+  "action": "tool",
+  "tool": "terminal",
+  "input": {
+    "command": "npm run build"
+  }
+}
 
-2. If the user asks you to run a command, use the terminal tool.
+3. If the user asks you to create or write a file, use the file tool.
 
-3. If the request can be answered without a tool, answer directly.
+4. If the user asks you to run a command, use the terminal tool.
 
-4. Return ONLY valid JSON.
+5. Do not claim that you performed an action unless you actually use the appropriate tool.
 
-5. Do not use markdown.
+6. Do not say that you need additional information when an available tool can perform the requested operation.
 
-6. Do not explain your decision outside the JSON.
+7. Do not answer from assumptions when a tool can provide the real result.
 
-For a file operation:
+8. Return ONLY valid JSON.
+
+For a terminal tool call:
+
+{
+  "action": "tool",
+  "tool": "terminal",
+  "input": {
+    "command": "npm run build"
+  }
+}
+
+For a file tool call:
 
 {
   "action": "tool",
@@ -100,22 +116,16 @@ For a file operation:
   }
 }
 
-For a terminal operation:
-
-{
-  "action": "tool",
-  "tool": "terminal",
-  "input": {
-    "command": "npm run build"
-  }
-}
-
-For a normal answer:
+For a normal question that does not require a tool:
 
 {
   "action": "answer",
   "response": "your answer"
 }
+
+Do not use markdown.
+Do not explain your decision.
+Do not put text outside the JSON.
 `;
 
     const rawResponse = await askOllama(prompt);
@@ -144,9 +154,9 @@ For a normal answer:
         return `Tool not found: ${decision.tool}`;
       }
 
-      const result = await tool.execute(
-        JSON.stringify(decision.input)
-      );
+      const toolInput = JSON.stringify(decision.input);
+
+      const result = await tool.execute(toolInput);
 
       return result;
     }
