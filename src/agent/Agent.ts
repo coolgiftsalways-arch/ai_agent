@@ -1,5 +1,6 @@
 import { askOllama } from "../ollama/OllamaClient.js";
 import { FileTool } from "../tools/FileTool.js";
+import { TerminalTool } from "../tools/TerminalTool.js";
 import type { Tool } from "../tools/Tool.js";
 
 type AgentDecision =
@@ -10,11 +11,7 @@ type AgentDecision =
   | {
       action: "tool";
       tool: string;
-      input: {
-        action: string;
-        path: string;
-        content?: string;
-      };
+      input: Record<string, unknown>;
     };
 
 export class Agent {
@@ -23,32 +20,76 @@ export class Agent {
   constructor() {
     this.tools = [
       new FileTool(),
+      new TerminalTool(),
     ];
   }
 
   async run(userInput: string): Promise<string> {
+    const toolDescriptions = this.tools
+      .map(
+        (tool) =>
+          `Tool: ${tool.name}\nDescription: ${tool.description}`
+      )
+      .join("\n\n");
+
     const prompt = `
-You are an AI agent that controls computer tools.
+You are a local AI coding agent.
 
-User request:
-"${userInput}"
+You receive a user's request and decide whether to answer directly
+or use one of your available tools.
 
-Available tool:
+Available tools:
 
-file
-- Create or write a file:
-  {"action":"write","path":"filename.txt","content":"text"}
-- Read a file:
-  {"action":"read","path":"filename.txt"}
-- List files:
-  {"action":"list","path":"."}
+${toolDescriptions}
 
-IMPORTANT:
-If the user asks you to create or write a file, you MUST use the file tool.
+FILE TOOL:
 
-Return ONLY valid JSON.
+Write a file:
+{
+  "action": "write",
+  "path": "hello.txt",
+  "content": "Hello World"
+}
 
-For a tool:
+Read a file:
+{
+  "action": "read",
+  "path": "hello.txt"
+}
+
+List files:
+{
+  "action": "list",
+  "path": "."
+}
+
+TERMINAL TOOL:
+
+Run a command:
+{
+  "command": "npm run build"
+}
+
+USER REQUEST:
+
+${userInput}
+
+RULES:
+
+1. If the user asks you to create, write, read, or list files, use the file tool.
+
+2. If the user asks you to run a command, use the terminal tool.
+
+3. If the request can be answered without a tool, answer directly.
+
+4. Return ONLY valid JSON.
+
+5. Do not use markdown.
+
+6. Do not explain your decision outside the JSON.
+
+For a file operation:
+
 {
   "action": "tool",
   "tool": "file",
@@ -59,14 +100,22 @@ For a tool:
   }
 }
 
+For a terminal operation:
+
+{
+  "action": "tool",
+  "tool": "terminal",
+  "input": {
+    "command": "npm run build"
+  }
+}
+
 For a normal answer:
+
 {
   "action": "answer",
   "response": "your answer"
 }
-
-Do not use markdown.
-Do not explain anything outside the JSON.
 `;
 
     const rawResponse = await askOllama(prompt);
@@ -95,9 +144,11 @@ Do not explain anything outside the JSON.
         return `Tool not found: ${decision.tool}`;
       }
 
-      const toolInput = JSON.stringify(decision.input);
+      const result = await tool.execute(
+        JSON.stringify(decision.input)
+      );
 
-      return await tool.execute(toolInput);
+      return result;
     }
 
     return "Unknown agent action.";

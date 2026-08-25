@@ -6,7 +6,7 @@ export class FileTool implements Tool {
   name = "file";
 
   description =
-    "Create, read, write, and list files inside the AI agent workspace.";
+    "Create, write, read, and list files inside the AI agent workspace.";
 
   async execute(input: string): Promise<string> {
     try {
@@ -15,11 +15,20 @@ export class FileTool implements Tool {
       const action = data.action;
       const filePath = data.path;
 
-      if (!filePath) {
+      if (!filePath || typeof filePath !== "string") {
         return "Error: file path is required.";
       }
 
-      const safePath = path.resolve(process.cwd(), filePath);
+      const workspace = path.resolve(process.cwd());
+      const safePath = path.resolve(workspace, filePath);
+
+      // Prevent the tool from accessing files outside the project.
+      if (
+        safePath !== workspace &&
+        !safePath.startsWith(workspace + path.sep)
+      ) {
+        return "Error: file path is outside the agent workspace.";
+      }
 
       switch (action) {
         case "write": {
