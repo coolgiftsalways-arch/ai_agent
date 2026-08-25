@@ -2,6 +2,7 @@ import { askOllama } from "../ollama/OllamaClient.js";
 import { FileTool } from "../tools/FileTool.js";
 import { TerminalTool } from "../tools/TerminalTool.js";
 import type { Tool } from "../tools/Tool.js";
+import { Executor } from "./Executor.js";
 
 type AgentDecision =
   | {
@@ -16,12 +17,77 @@ type AgentDecision =
 
 export class Agent {
   private tools: Tool[];
+  private executor: Executor;
 
   constructor() {
     this.tools = [
       new FileTool(),
       new TerminalTool(),
     ];
+
+    this.executor = new Executor(this.tools);
+  }
+
+  private parseDecision(rawResponse: string): AgentDecision | null {
+    // Remove markdown code fences if the model adds them.
+    const cleaned = rawResponse
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+
+    // Find the first JSON object.
+    const start = cleaned.indexOf("{");
+
+    if (start === -1) {
+      return null;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < cleaned.length; i++) {
+      const char = cleaned[i];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (inString) {
+        continue;
+      }
+
+      if (char === "{") {
+        depth++;
+      }
+
+      if (char === "}") {
+        depth--;
+
+        if (depth === 0) {
+          const jsonText = cleaned.slice(start, i + 1);
+
+          try {
+            return JSON.parse(jsonText) as AgentDecision;
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   async run(userInput: string): Promise<string> {
@@ -32,11 +98,11 @@ export class Agent {
       )
       .join("\n\n");
 
-    const prompt = `
+    let conversation = `
 You are a local AI coding agent.
 
-You receive a user's request and decide whether to answer directly
-or use one of your available tools.
+User request:
+${userInput}
 
 Available tools:
 
@@ -44,20 +110,20 @@ ${toolDescriptions}
 
 FILE TOOL:
 
-Write a file:
+Write:
 {
   "action": "write",
-  "path": "hello.txt",
-  "content": "Hello World"
+  "path": "file.txt",
+  "content": "content"
 }
 
-Read a file:
+Read:
 {
   "action": "read",
-  "path": "hello.txt"
+  "path": "file.txt"
 }
 
-List files:
+List:
 {
   "action": "list",
   "path": "."
@@ -65,92 +131,113 @@ List files:
 
 TERMINAL TOOL:
 
-Run a command:
+Run:
 {
   "command": "npm run build"
 }
 
-USER REQUEST:
+IMPORTANT RULES:
 
-${userInput}
+1. Perform ONLY ONE action at a time.
+2. Return ONLY ONE JSON object.
+3. NEVER return multiple JSON objects.
+4. After a tool result is provided, decide what to do next.
+5. If the task is complete, return an answer.
+6. Do not use markdown.
 
-RULES:
-
-1. If the user asks you to create, write, read, or list files, use the file tool.
-
-2. If the user asks you to run a command, use the terminal tool.
-
-3. If the request can be answered without a tool, answer directly.
-
-4. Return ONLY valid JSON.
-
-5. Do not use markdown.
-
-6. Do not explain your decision outside the JSON.
-
-For a file operation:
+Tool format:
 
 {
   "action": "tool",
   "tool": "file",
-  "input": {
-    "action": "write",
-    "path": "hello.txt",
-    "content": "Hello World"
-  }
+  "input": {}
 }
 
-For a terminal operation:
+OR:
 
 {
   "action": "tool",
   "tool": "terminal",
-  "input": {
-    "command": "npm run build"
-  }
+  "input": {}
 }
 
-For a normal answer:
+Final answer format:
 
 {
   "action": "answer",
-  "response": "your answer"
+  "response": "Task completed."
 }
 `;
 
-    const rawResponse = await askOllama(prompt);
+    const MAX_STEPS = 5;
 
-    console.log("\nModel decision:");
-    console.log(rawResponse);
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      console.log(`\n🧠 Agent step ${step}/${MAX_STEPS}`);
 
-    let decision: AgentDecision;
+      const rawResponse = await askOllama(conversation);
 
-    try {
-      decision = JSON.parse(rawResponse);
-    } catch {
-      return `I couldn't understand the model's decision:\n${rawResponse}`;
-    }
+      console.log("\nModel decision:");
+      console.log(rawResponse);
 
-    if (decision.action === "answer") {
-      return decision.response;
-    }
+      const decision = this.parseDecision(rawResponse);
 
-    if (decision.action === "tool") {
-      const tool = this.tools.find(
-        (availableTool) => availableTool.name === decision.tool
-      );
-
-      if (!tool) {
-        return `Tool not found: ${decision.tool}`;
+      if (!decision) {
+        return `I couldn't understand the model response:\n${rawResponse}`;
       }
 
-      const result = await tool.execute(
-        JSON.stringify(decision.input)
-      );
+      if (decision.action === "answer") {
+        return decision.response;
+      }
 
-      return result;
+      if (decision.action === "tool") {
+        console.log(`\n🔧 Executing tool: ${decision.tool}`);
+
+        const result = await this.executor.execute(
+          decision.tool,
+          decision.input
+        );
+
+        console.log("\n📋 Tool result:");
+        console.log(result);
+
+        conversation += `
+
+IMPORTANT:
+You already completed the previous action.
+
+Previous tool:
+${decision.tool}
+
+Previous tool input:
+${JSON.stringify(decision.input)}
+
+Previous tool result:
+${result}
+
+Now perform ONLY ONE next action.
+
+If another tool is required, return ONE JSON object:
+
+{
+  "action": "tool",
+  "tool": "tool_name",
+  "input": {}
+}
+
+If the task is complete, return ONE JSON object:
+
+{
+  "action": "answer",
+  "response": "Task completed."
+}
+`;
+
+        continue;
+      }
+
+      return "Unknown agent action.";
     }
 
-    return "Unknown agent action.";
+    return "The agent stopped because the maximum number of steps was reached.";
   }
 }

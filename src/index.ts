@@ -5,11 +5,18 @@ async function main() {
 
   const agent = new Agent();
 
-  const result = await agent.run(
-    "Run npm run build and tell me whether the project builds successfully."
-  );
+  const result = await agent.run(`
+Create a file called agent-test.txt containing:
 
-  console.log("\nAgent:");
+AI Agent is working.
+
+Then run npm run build to verify that the project still builds successfully.
+`);
+
+  console.log("\n==============================");
+  console.log("🤖 FINAL AGENT RESPONSE");
+  console.log("==============================\n");
+
   console.log(result);
 }
 
