@@ -1,40 +1,136 @@
 import { askOllama } from "../ollama/OllamaClient.js";
+
 import { FileTool } from "../tools/FileTool.js";
-import type { Tool } from "../tools/Tool.js";
 import { TerminalTool } from "../tools/TerminalTool.js";
+
 import { Executor } from "./Executor.js";
 
+import { PermissionManager } from "../security/PermissionManager.js";
+import { askForApproval } from "../security/ConsoleApproval.js";
+
+import { buildSystemPrompt } from "../prompts/systemPrompt.js";
+
+type AnswerDecision = {
+  action: "answer";
+  response: string;
+};
+
+type FileToolAction =
+  | "createFolder"
+  | "createFile"
+  | "readFile"
+  | "writeFile"
+  | "listFiles"
+  | "fileExists"
+  | "renameFile"
+  | "moveFile"
+  | "deleteFile"
+  | "deleteFolder";
+
+type FileToolDecision = {
+  action: "tool";
+  tool: "file";
+  toolAction: FileToolAction;
+  parameters: Record<string, unknown>;
+};
+
+type TerminalToolDecision = {
+  action: "tool";
+  tool: "terminal";
+  toolAction: "run";
+  parameters: {
+    command: string;
+    cwd?: string;
+  };
+};
+
 type AgentDecision =
-  | {
-      action: "answer";
-      response: string;
-    }
-  | {
-      action: "tool";
-      tool: string;
-      input: Record<string, unknown>;
-    };
+  | AnswerDecision
+  | FileToolDecision
+  | TerminalToolDecision;
 
 export class Agent {
-  private tools: Tool[];
   private executor: Executor;
 
   constructor() {
-    this.tools = [
-      new FileTool(),
-      new TerminalTool(),
-    ];
+    /*
+    ==========================================
+    PERMISSION MANAGER
+    ==========================================
+    */
 
-    this.executor = new Executor(this.tools);
+    const permissionManager =
+      new PermissionManager(
+        askForApproval
+      );
+
+    /*
+    ==========================================
+    EXECUTOR
+    ==========================================
+    */
+
+    this.executor =
+      new Executor(
+        permissionManager
+      );
+
+    /*
+    ==========================================
+    FILE TOOL
+    ==========================================
+    */
+
+    const fileTool =
+      new FileTool([
+        process.cwd(),
+        "S:\\",
+      ]);
+
+    /*
+    ==========================================
+    TERMINAL TOOL
+    ==========================================
+    */
+
+    const terminalTool =
+      new TerminalTool([
+        process.cwd(),
+        "S:\\",
+      ]);
+
+    /*
+    ==========================================
+    REGISTER TOOLS
+    ==========================================
+    */
+
+    this.executor.registerTool(
+      fileTool
+    );
+
+    this.executor.registerTool(
+      terminalTool
+    );
   }
 
-  private parseDecision(rawResponse: string): AgentDecision | null {
-    const cleaned = rawResponse
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
+  /*
+  ==========================================
+  PARSE MODEL RESPONSE
+  ==========================================
+  */
 
-    const start = cleaned.indexOf("{");
+  private parseDecision(
+    rawResponse: string
+  ): AgentDecision | null {
+    const cleaned =
+      rawResponse
+        .replace(/```json/gi, "")
+        .replace(/```/g, "")
+        .trim();
+
+    const start =
+      cleaned.indexOf("{");
 
     if (start === -1) {
       return null;
@@ -44,8 +140,13 @@ export class Agent {
     let inString = false;
     let escaped = false;
 
-    for (let i = start; i < cleaned.length; i++) {
-      const char = cleaned[i];
+    for (
+      let i = start;
+      i < cleaned.length;
+      i++
+    ) {
+      const char =
+        cleaned[i];
 
       if (escaped) {
         escaped = false;
@@ -58,7 +159,9 @@ export class Agent {
       }
 
       if (char === '"') {
-        inString = !inString;
+        inString =
+          !inString;
+
         continue;
       }
 
@@ -74,11 +177,76 @@ export class Agent {
         depth--;
 
         if (depth === 0) {
-          const jsonText = cleaned.slice(start, i + 1);
+          const jsonText =
+            cleaned.slice(
+              start,
+              i + 1
+            );
 
           try {
-            return JSON.parse(jsonText) as AgentDecision;
+            const parsed =
+              JSON.parse(
+                jsonText
+              );
+
+            /*
+            --------------------------
+            FINAL ANSWER
+            --------------------------
+            */
+
+            if (
+              parsed.action === "answer" &&
+              typeof parsed.response ===
+                "string"
+            ) {
+              return {
+                action: "answer",
+                response:
+                  parsed.response,
+              };
+            }
+
+            /*
+            --------------------------
+            TOOL CALL
+            --------------------------
+            */
+
+            if (
+              parsed.action === "tool" &&
+              (
+                parsed.tool === "file" ||
+                parsed.tool ===
+                  "terminal"
+              ) &&
+              typeof parsed.toolAction ===
+                "string" &&
+              parsed.parameters &&
+              typeof parsed.parameters ===
+                "object"
+            ) {
+              return (
+                parsed as AgentDecision
+              );
+            }
+
+            console.log(
+              "\n⚠️ Model returned JSON but used the wrong schema."
+            );
+
+            console.log(parsed);
+
+            return null;
           } catch {
+            console.log(
+              "\n❌ Invalid JSON:"
+            );
+
+            console.log(
+              jsonText
+            );
+
             return null;
           }
         }
@@ -88,144 +256,153 @@ export class Agent {
     return null;
   }
 
-  async run(userInput: string): Promise<string> {
-    const toolDescriptions = this.tools
-      .map(
-        (tool) =>
-          `Tool: ${tool.name}\nDescription: ${tool.description}`
-      )
-      .join("\n\n");
+  /*
+  ==========================================
+  RUN AGENT
+  ==========================================
+  */
 
-    const conversation = `
-You are a local AI coding agent.
+  async run(
+    userInput: string
+  ): Promise<string> {
 
-Your job is to understand the user's request and either:
-1. Answer directly, or
-2. Use one of your available tools.
+    /*
+    ========================================
+    BUILD PROMPT
+    ========================================
+    */
 
-AVAILABLE TOOLS:
+    let conversationHistory =
+      buildSystemPrompt(
+        userInput
+      );
 
-${toolDescriptions}
+    /*
+    ========================================
+    AGENT LOOP
+    ========================================
+    */
 
-FILE TOOL EXAMPLES:
+    const MAX_STEPS = 30;
 
-Write a file:
-{
-  "action": "write",
-  "path": "hello.txt",
-  "content": "Hello World"
-}
+    for (
+      let step = 1;
+      step <= MAX_STEPS;
+      step++
+    ) {
+      console.log(
+        `\n🧠 Agent step ${step}/${MAX_STEPS}`
+      );
 
-Read a file:
-{
-  "action": "read",
-  "path": "hello.txt"
-}
+      console.log(
+        "Thinking..."
+      );
 
-List files:
-{
-  "action": "list",
-  "path": "."
-}
+      /*
+      ----------------------------------------
+      ASK OLLAMA
+      ----------------------------------------
+      */
 
-TERMINAL TOOL EXAMPLE:
+      const rawResponse =
+        await askOllama(
+          conversationHistory
+        );
 
-{
-  "command": "npm run build"
-}
+      console.log(
+        "\n🤖 Model decision:"
+      );
 
-USER REQUEST:
+      console.log(
+        rawResponse
+      );
 
-${userInput}
+      /*
+      ----------------------------------------
+      PARSE RESPONSE
+      ----------------------------------------
+      */
 
-RULES:
+      const decision =
+        this.parseDecision(
+          rawResponse
+        );
 
-1. If the user asks you to create, write, read, or list files, use the file tool.
+      /*
+      ----------------------------------------
+      INVALID RESPONSE
+      ----------------------------------------
+      */
 
-2. If the user asks you to run, execute, check, test, build, or install something, use the terminal tool.
+      if (!decision) {
+        console.log(
+          "\n⚠️ Invalid agent response format."
+        );
 
-3. If the task requires multiple actions, perform the actions one at a time.
+        console.log(
+          "Asking model to correct itself..."
+        );
 
-4. After a tool returns a result, decide what to do next.
+        conversationHistory += `
 
-5. Do not claim that an action was completed unless the tool actually completed it.
 
-6. Return ONLY valid JSON.
+==================================================
+FORMAT ERROR
+==================================================
 
-7. Do not use markdown.
+Your previous response was:
 
-8. Do not explain your decision outside the JSON.
+${rawResponse}
 
-TOOL FORMAT:
+That response is INVALID.
+
+You MUST return one of these formats.
+
+
+TOOL:
 
 {
   "action": "tool",
   "tool": "file",
-  "input": {
-    "action": "write",
-    "path": "hello.txt",
-    "content": "Hello World"
+  "toolAction": "readFile",
+  "parameters": {
+    "path": "S:\\\\example.txt"
   }
 }
 
+
 OR:
+
 
 {
   "action": "tool",
   "tool": "terminal",
-  "input": {
-    "command": "npm run build"
+  "toolAction": "run",
+  "parameters": {
+    "command": "npm run build",
+    "cwd": "S:\\\\project"
   }
 }
 
-ANSWER FORMAT:
+
+WHEN FINISHED:
 
 {
   "action": "answer",
-  "response": "your final answer"
+  "response": "Task completed successfully."
 }
-`;
 
-    let conversationHistory = conversation;
 
-    const MAX_STEPS = 5;
+Do not use:
 
-    for (let step = 1; step <= MAX_STEPS; step++) {
-      console.log(`\n🧠 Agent step ${step}/${MAX_STEPS}`);
+"status"
+"message"
+"details"
+"output"
 
-      const rawResponse = await askOllama(conversationHistory);
+as top-level response formats.
 
-      console.log("\nModel decision:");
-      console.log(rawResponse);
-
-      const decision = this.parseDecision(rawResponse);
-
-      if (!decision) {
-        return `I couldn't understand the model response:\n${rawResponse}`;
-      }
-
-      if (decision.action === "answer") {
-        return decision.response;
-      }
-
-      if (decision.action === "tool") {
-        const result = await this.executor.execute(
-          decision.tool,
-          decision.input
-        );
-
-        console.log("\n🔧 Tool result:");
-        console.log(result);
-
-        conversationHistory += `
-
-MODEL DECISION:
-${rawResponse}
-
-TOOL RESULT:
-${result}
-
-Based on the tool result, decide what to do next.
+Do not invent file paths.
 
 Return ONLY valid JSON.
 `;
@@ -233,9 +410,140 @@ Return ONLY valid JSON.
         continue;
       }
 
-      return "Unknown agent action.";
+      /*
+      ========================================
+      FINAL ANSWER
+      ========================================
+      */
+
+      if (
+        decision.action ===
+        "answer"
+      ) {
+        return (
+          decision.response
+        );
+      }
+
+      /*
+      ========================================
+      TOOL ACTION
+      ========================================
+      */
+
+      if (
+        decision.action ===
+        "tool"
+      ) {
+        console.log(
+          `\n🔧 Using tool: ${decision.tool}.${decision.toolAction}`
+        );
+
+        /*
+        ----------------------------------------
+        EXECUTE TOOL
+        ----------------------------------------
+        */
+
+        const result =
+          await this.executor.execute({
+            tool:
+              decision.tool,
+
+            action:
+              decision.toolAction,
+
+            parameters:
+              decision.parameters,
+          });
+
+        console.log(
+          "\n🔧 Tool result:"
+        );
+
+        console.log(
+          result
+        );
+
+        /*
+        ----------------------------------------
+        SEND RESULT BACK TO AI
+        ----------------------------------------
+        */
+
+        conversationHistory += `
+
+
+==================================================
+PREVIOUS MODEL DECISION
+==================================================
+
+${rawResponse}
+
+
+==================================================
+TOOL RESULT
+==================================================
+
+${JSON.stringify(
+  result,
+  null,
+  2
+)}
+
+
+==================================================
+ORIGINAL USER REQUEST
+==================================================
+
+${userInput}
+
+
+==================================================
+NEXT ACTION
+==================================================
+
+Look at the tool result.
+
+Determine whether the original user request
+has been completely finished.
+
+If more work is required,
+use the next appropriate tool.
+
+If the tool failed,
+inspect the error and try to fix it safely.
+
+If everything succeeded,
+return:
+
+{
+  "action": "answer",
+  "response": "Task completed successfully."
+}
+
+Do not repeat an action that already succeeded.
+
+Do not claim success when:
+
+"success": false
+
+Return ONLY valid JSON.
+`;
+
+        continue;
+      }
     }
 
-    return "The agent stopped because the maximum number of steps was reached.";
+    /*
+    ========================================
+    MAX STEPS
+    ========================================
+    */
+
+    return (
+      "The agent stopped because " +
+      "the maximum number of steps was reached."
+    );
   }
 }

@@ -1,6 +1,15 @@
+export interface ToolResult {
+  success: boolean;
+  message: string;
+  data?: unknown;
+}
+
 export interface Tool {
   name: string;
-  description: string;
+  
 
-  execute(input: string): Promise<string>;
+  execute(
+    action: string,
+    parameters: Record<string, unknown>
+  ): Promise<ToolResult>;
 }
