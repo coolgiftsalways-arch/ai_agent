@@ -31,43 +31,57 @@ export class FileTool implements Tool {
     return resolved;
   }
 
-  private isAllowed(requestedPath: string): boolean {
-  const requested = path.resolve(requestedPath);
+  private isAllowed(
+    requestedPath: string
+  ): boolean {
+    const requested =
+      path.resolve(requestedPath);
 
-  return this.allowedRoots.some((root) => {
-    const allowedRoot = path.resolve(root);
+    return this.allowedRoots.some(
+      (root) => {
+        const allowedRoot =
+          path.resolve(root);
 
-    const relative = path.relative(
-      allowedRoot,
-      requested
+        const relative =
+          path.relative(
+            allowedRoot,
+            requested
+          );
+
+        return (
+          relative === "" ||
+          (
+            !relative.startsWith("..") &&
+            !path.isAbsolute(relative)
+          )
+        );
+      }
     );
-
-    return (
-      relative === "" ||
-      (
-        !relative.startsWith("..") &&
-        !path.isAbsolute(relative)
-      )
-    );
-  });
-}
+  }
 
   private resolveSafePath(
     requestedPath: string
   ): string {
     let finalPath: string;
 
-    if (path.isAbsolute(requestedPath)) {
+    if (
+      path.isAbsolute(requestedPath)
+    ) {
       finalPath =
-        path.resolve(requestedPath);
+        path.resolve(
+          requestedPath
+        );
     } else {
-      finalPath = path.resolve(
-        this.allowedRoots[0],
-        requestedPath
-      );
+      finalPath =
+        path.resolve(
+          this.allowedRoots[0],
+          requestedPath
+        );
     }
 
-    if (!this.isAllowed(finalPath)) {
+    if (
+      !this.isAllowed(finalPath)
+    ) {
       throw new Error(
         `Access denied. Path is outside allowed folders: ${finalPath}`
       );
@@ -76,37 +90,99 @@ export class FileTool implements Tool {
     return finalPath;
   }
 
+  /*
+  ==========================================
+  ENSURE PARENT DIRECTORY EXISTS
+  ==========================================
+
+  Important on Windows:
+
+  If filePath is:
+
+  S:\hello.txt
+
+  parent is:
+
+  S:\
+
+  We should NOT try to run mkdir on
+  the drive root because it already exists.
+  */
+
+  private async ensureParentDirectory(
+    filePath: string
+  ) {
+    const parent =
+      path.dirname(filePath);
+
+    const root =
+      path.parse(filePath).root;
+
+    if (
+      path.resolve(parent) ===
+      path.resolve(root)
+    ) {
+      return;
+    }
+
+    await fs.mkdir(
+      parent,
+      {
+        recursive: true,
+      }
+    );
+  }
+
+  /*
+  ==========================================
+  CREATE FOLDER
+  ==========================================
+  */
+
   async createFolder(
     folderPath: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(folderPath);
+      this.resolveSafePath(
+        folderPath
+      );
 
-    await fs.mkdir(safePath, {
-      recursive: true,
-    });
+    await fs.mkdir(
+      safePath,
+      {
+        recursive: true,
+      }
+    );
 
     return {
       success: true,
-      message: `Folder created: ${safePath}`,
+
+      message:
+        `Folder created: ${safePath}`,
+
       data: {
         path: safePath,
       },
     };
   }
 
+  /*
+  ==========================================
+  CREATE FILE
+  ==========================================
+  */
+
   async createFile(
     filePath: string,
     content = ""
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(filePath);
+      this.resolveSafePath(
+        filePath
+      );
 
-    await fs.mkdir(
-      path.dirname(safePath),
-      {
-        recursive: true,
-      }
+    await this.ensureParentDirectory(
+      safePath
     );
 
     try {
@@ -116,15 +192,23 @@ export class FileTool implements Tool {
         {
           encoding: "utf8",
 
-          // Do not overwrite existing files.
+          /*
+          Do NOT overwrite
+          an existing file.
+          */
+
           flag: "wx",
         }
       );
     } catch (error: any) {
-      if (error.code === "EEXIST") {
+      if (
+        error.code === "EEXIST"
+      ) {
         return {
           success: false,
-          message: `File already exists: ${safePath}`,
+
+          message:
+            `File already exists: ${safePath}`,
         };
       }
 
@@ -133,18 +217,29 @@ export class FileTool implements Tool {
 
     return {
       success: true,
-      message: `File created: ${safePath}`,
+
+      message:
+        `File created: ${safePath}`,
+
       data: {
         path: safePath,
       },
     };
   }
 
+  /*
+  ==========================================
+  READ FILE
+  ==========================================
+  */
+
   async readFile(
     filePath: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(filePath);
+      this.resolveSafePath(
+        filePath
+      );
 
     const content =
       await fs.readFile(
@@ -154,48 +249,71 @@ export class FileTool implements Tool {
 
     return {
       success: true,
-      message: `File read successfully: ${safePath}`,
+
+      message:
+        `File read successfully: ${safePath}`,
+
       data: {
-        path: safePath,
+        path:
+          safePath,
+
         content,
       },
     };
   }
+
+  /*
+  ==========================================
+  WRITE / REPLACE FILE CONTENT
+  ==========================================
+  */
 
   async writeFile(
     filePath: string,
     content: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(filePath);
+      this.resolveSafePath(
+        filePath
+      );
 
-    await fs.mkdir(
-      path.dirname(safePath),
-      {
-        recursive: true,
-      }
+    await this.ensureParentDirectory(
+      safePath
     );
 
     await fs.writeFile(
       safePath,
       content,
-      "utf8"
+      {
+        encoding: "utf8",
+      }
     );
 
     return {
       success: true,
-      message: `File written: ${safePath}`,
+
+      message:
+        `File written: ${safePath}`,
+
       data: {
         path: safePath,
       },
     };
   }
 
+  /*
+  ==========================================
+  LIST FILES
+  ==========================================
+  */
+
   async listFiles(
     folderPath = "."
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(folderPath);
+      this.resolveSafePath(
+        folderPath
+      );
 
     const entries =
       await fs.readdir(
@@ -205,70 +323,108 @@ export class FileTool implements Tool {
         }
       );
 
-    const files = entries.map(
-      (entry) => ({
-        name: entry.name,
+    const files =
+      entries.map(
+        (entry) => ({
+          name:
+            entry.name,
 
-        type: entry.isDirectory()
-          ? "folder"
-          : "file",
-      })
-    );
+          type:
+            entry.isDirectory()
+              ? "folder"
+              : "file",
+        })
+      );
 
     return {
       success: true,
-      message: `Found ${files.length} items.`,
+
+      message:
+        `Found ${files.length} items.`,
+
       data: {
-        path: safePath,
-        items: files,
+        path:
+          safePath,
+
+        items:
+          files,
       },
     };
   }
+
+  /*
+  ==========================================
+  CHECK FILE / FOLDER EXISTS
+  ==========================================
+  */
 
   async fileExists(
     filePath: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(filePath);
+      this.resolveSafePath(
+        filePath
+      );
 
     try {
-      await fs.access(safePath);
+      await fs.access(
+        safePath
+      );
 
       return {
         success: true,
-        message: "Path exists.",
+
+        message:
+          "Path exists.",
+
         data: {
-          path: safePath,
-          exists: true,
+          path:
+            safePath,
+
+          exists:
+            true,
         },
       };
     } catch {
       return {
         success: true,
-        message: "Path does not exist.",
+
+        message:
+          "Path does not exist.",
+
         data: {
-          path: safePath,
-          exists: false,
+          path:
+            safePath,
+
+          exists:
+            false,
         },
       };
     }
   }
+
+  /*
+  ==========================================
+  RENAME FILE / FOLDER
+  ==========================================
+  */
 
   async renameFile(
     oldPath: string,
     newPath: string
   ): Promise<ToolResult> {
     const safeOld =
-      this.resolveSafePath(oldPath);
+      this.resolveSafePath(
+        oldPath
+      );
 
     const safeNew =
-      this.resolveSafePath(newPath);
+      this.resolveSafePath(
+        newPath
+      );
 
-    await fs.mkdir(
-      path.dirname(safeNew),
-      {
-        recursive: true,
-      }
+    await this.ensureParentDirectory(
+      safeNew
     );
 
     await fs.rename(
@@ -278,10 +434,25 @@ export class FileTool implements Tool {
 
     return {
       success: true,
+
       message:
         `Renamed:\n${safeOld}\n→ ${safeNew}`,
+
+      data: {
+        oldPath:
+          safeOld,
+
+        newPath:
+          safeNew,
+      },
     };
   }
+
+  /*
+  ==========================================
+  MOVE FILE
+  ==========================================
+  */
 
   async moveFile(
     oldPath: string,
@@ -293,25 +464,78 @@ export class FileTool implements Tool {
     );
   }
 
+  /*
+  ==========================================
+  DELETE FILE
+  ==========================================
+  */
+
   async deleteFile(
     filePath: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(filePath);
+      this.resolveSafePath(
+        filePath
+      );
 
-    await fs.unlink(safePath);
+    await fs.unlink(
+      safePath
+    );
 
     return {
       success: true,
-      message: `File deleted: ${safePath}`,
+
+      message:
+        `File deleted: ${safePath}`,
+
+      data: {
+        path: safePath,
+      },
     };
   }
+
+  /*
+  ==========================================
+  DELETE FOLDER
+  ==========================================
+  */
 
   async deleteFolder(
     folderPath: string
   ): Promise<ToolResult> {
     const safePath =
-      this.resolveSafePath(folderPath);
+      this.resolveSafePath(
+        folderPath
+      );
+
+    /*
+    Extra protection:
+    Never allow deleting an allowed
+    root itself such as S:\
+    */
+
+    const normalizedSafe =
+      this.normalizeForComparison(
+        safePath
+      );
+
+    const isRoot =
+      this.allowedRoots.some(
+        (root) =>
+          this.normalizeForComparison(
+            root
+          ) ===
+          normalizedSafe
+      );
+
+    if (isRoot) {
+      return {
+        success: false,
+
+        message:
+          `Refusing to delete allowed root: ${safePath}`,
+      };
+    }
 
     await fs.rm(
       safePath,
@@ -323,26 +547,44 @@ export class FileTool implements Tool {
 
     return {
       success: true,
-      message: `Folder deleted: ${safePath}`,
+
+      message:
+        `Folder deleted: ${safePath}`,
+
+      data: {
+        path: safePath,
+      },
     };
   }
 
+  /*
+  ==========================================
+  EXECUTE
+  ==========================================
+  */
+
   async execute(
     action: string,
-    parameters: Record<string, unknown>
+    parameters:
+      Record<string, unknown>
   ): Promise<ToolResult> {
     try {
       switch (action) {
         case "createFolder":
           return await this.createFolder(
-            String(parameters.path)
+            String(
+              parameters.path
+            )
           );
 
         case "createFile":
           return await this.createFile(
-            String(parameters.path),
+            String(
+              parameters.path
+            ),
 
-            parameters.content
+            parameters.content !==
+              undefined
               ? String(
                   parameters.content
                 )
@@ -351,54 +593,79 @@ export class FileTool implements Tool {
 
         case "readFile":
           return await this.readFile(
-            String(parameters.path)
+            String(
+              parameters.path
+            )
           );
 
         case "writeFile":
           return await this.writeFile(
-            String(parameters.path),
             String(
-              parameters.content ?? ""
+              parameters.path
+            ),
+
+            String(
+              parameters.content ??
+              ""
             )
           );
 
         case "listFiles":
           return await this.listFiles(
             parameters.path
-              ? String(parameters.path)
+              ? String(
+                  parameters.path
+                )
               : "."
           );
 
         case "fileExists":
           return await this.fileExists(
-            String(parameters.path)
+            String(
+              parameters.path
+            )
           );
 
         case "renameFile":
           return await this.renameFile(
-            String(parameters.oldPath),
-            String(parameters.newPath)
+            String(
+              parameters.oldPath
+            ),
+
+            String(
+              parameters.newPath
+            )
           );
 
         case "moveFile":
           return await this.moveFile(
-            String(parameters.oldPath),
-            String(parameters.newPath)
+            String(
+              parameters.oldPath
+            ),
+
+            String(
+              parameters.newPath
+            )
           );
 
         case "deleteFile":
           return await this.deleteFile(
-            String(parameters.path)
+            String(
+              parameters.path
+            )
           );
 
         case "deleteFolder":
           return await this.deleteFolder(
-            String(parameters.path)
+            String(
+              parameters.path
+            )
           );
 
         default:
           return {
             success: false,
+
             message:
               `Unknown FileTool action: ${action}`,
           };

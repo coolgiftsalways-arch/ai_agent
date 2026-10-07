@@ -1,56 +1,48 @@
-import { askOllama } from "../ollama/OllamaClient.js";
+import type { Message } from "ollama";
 
-import { FileTool } from "../tools/FileTool.js";
-import { TerminalTool } from "../tools/TerminalTool.js";
+import {
+  askOllama,
+} from "../ollama/OllamaClient.js";
 
-import { Executor } from "./Executor.js";
+import {
+  FileTool,
+} from "../tools/FileTool.js";
 
-import { PermissionManager } from "../security/PermissionManager.js";
-import { askForApproval } from "../security/ConsoleApproval.js";
+import {
+  TerminalTool,
+} from "../tools/TerminalTool.js";
 
-import { buildSystemPrompt } from "../prompts/systemPrompt.js";
+import {
+  agentTools,
+  mapNativeToolCall,
+} from "../tools/NativeToolDefinitions.js";
 
-type AnswerDecision = {
-  action: "answer";
-  response: string;
-};
+import {
+  buildSystemPrompt,
+} from "../prompts/systemPrompt.js";
 
-type FileToolAction =
-  | "createFolder"
-  | "createFile"
-  | "readFile"
-  | "writeFile"
-  | "listFiles"
-  | "fileExists"
-  | "renameFile"
-  | "moveFile"
-  | "deleteFile"
-  | "deleteFolder";
+import {
+  PermissionManager,
+} from "../security/PermissionManager.js";
 
-type FileToolDecision = {
-  action: "tool";
-  tool: "file";
-  toolAction: FileToolAction;
-  parameters: Record<string, unknown>;
-};
+import {
+  askForApproval,
+} from "../security/ConsoleApproval.js";
 
-type TerminalToolDecision = {
-  action: "tool";
-  tool: "terminal";
-  toolAction: "run";
-  parameters: {
-    command: string;
-    cwd?: string;
-  };
-};
-
-type AgentDecision =
-  | AnswerDecision
-  | FileToolDecision
-  | TerminalToolDecision;
+import {
+  Executor,
+} from "./Executor.js";
 
 export class Agent {
   private executor: Executor;
+
+  /*
+  ==========================================
+  CONVERSATION MEMORY
+  ==========================================
+  */
+
+  private messages: Message[];
 
   constructor() {
     /*
@@ -112,178 +104,60 @@ export class Agent {
     this.executor.registerTool(
       terminalTool
     );
+
+    /*
+    ==========================================
+    START ONE CONTINUOUS CONVERSATION
+    ==========================================
+    */
+
+    this.messages = [
+      {
+        role: "system",
+        content:
+          buildSystemPrompt(),
+      },
+    ];
   }
 
   /*
   ==========================================
-  PARSE MODEL RESPONSE
-  ==========================================
-  */
-
-  private parseDecision(
-    rawResponse: string
-  ): AgentDecision | null {
-    const cleaned =
-      rawResponse
-        .replace(/```json/gi, "")
-        .replace(/```/g, "")
-        .trim();
-
-    const start =
-      cleaned.indexOf("{");
-
-    if (start === -1) {
-      return null;
-    }
-
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-
-    for (
-      let i = start;
-      i < cleaned.length;
-      i++
-    ) {
-      const char =
-        cleaned[i];
-
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (char === "\\") {
-        escaped = true;
-        continue;
-      }
-
-      if (char === '"') {
-        inString =
-          !inString;
-
-        continue;
-      }
-
-      if (inString) {
-        continue;
-      }
-
-      if (char === "{") {
-        depth++;
-      }
-
-      if (char === "}") {
-        depth--;
-
-        if (depth === 0) {
-          const jsonText =
-            cleaned.slice(
-              start,
-              i + 1
-            );
-
-          try {
-            const parsed =
-              JSON.parse(
-                jsonText
-              );
-
-            /*
-            --------------------------
-            FINAL ANSWER
-            --------------------------
-            */
-
-            if (
-              parsed.action === "answer" &&
-              typeof parsed.response ===
-                "string"
-            ) {
-              return {
-                action: "answer",
-                response:
-                  parsed.response,
-              };
-            }
-
-            /*
-            --------------------------
-            TOOL CALL
-            --------------------------
-            */
-
-            if (
-              parsed.action === "tool" &&
-              (
-                parsed.tool === "file" ||
-                parsed.tool ===
-                  "terminal"
-              ) &&
-              typeof parsed.toolAction ===
-                "string" &&
-              parsed.parameters &&
-              typeof parsed.parameters ===
-                "object"
-            ) {
-              return (
-                parsed as AgentDecision
-              );
-            }
-
-            console.log(
-              "\n⚠️ Model returned JSON but used the wrong schema."
-            );
-
-            console.log(parsed);
-
-            return null;
-          } catch {
-            console.log(
-              "\n❌ Invalid JSON:"
-            );
-
-            console.log(
-              jsonText
-            );
-
-            return null;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /*
-  ==========================================
-  RUN AGENT
+  RUN USER TASK
   ==========================================
   */
 
   async run(
     userInput: string
   ): Promise<string> {
-
     /*
-    ========================================
-    BUILD PROMPT
-    ========================================
+    ------------------------------------------
+    ADD THE NEW USER MESSAGE
+    ------------------------------------------
     */
 
-    let conversationHistory =
-      buildSystemPrompt(
-        userInput
-      );
-
-    /*
-    ========================================
-    AGENT LOOP
-    ========================================
-    */
+    this.messages.push({
+      role: "user",
+      content: userInput,
+    });
 
     const MAX_STEPS = 30;
+
+    /*
+    If a tool fails, don't allow the model
+    to immediately pretend the task worked.
+    */
+
+    let unresolvedToolFailure =
+      false;
+
+    let failureReminderCount =
+      0;
+
+    /*
+    ==========================================
+    AGENT LOOP
+    ==========================================
+    */
 
     for (
       let step = 1;
@@ -304,158 +178,174 @@ export class Agent {
       ----------------------------------------
       */
 
-      const rawResponse =
+      const response =
         await askOllama(
-          conversationHistory
+          this.messages,
+          agentTools
         );
 
-      console.log(
-        "\n🤖 Model decision:"
-      );
-
-      console.log(
-        rawResponse
-      );
+      const assistantMessage =
+        response.message;
 
       /*
-      ----------------------------------------
-      PARSE RESPONSE
-      ----------------------------------------
+      Save what the model said/called.
+      This is VERY IMPORTANT for memory.
       */
 
-      const decision =
-        this.parseDecision(
-          rawResponse
-        );
+      this.messages.push(
+        assistantMessage
+      );
 
-      /*
-      ----------------------------------------
-      INVALID RESPONSE
-      ----------------------------------------
-      */
-
-      if (!decision) {
-        console.log(
-          "\n⚠️ Invalid agent response format."
-        );
-
-        console.log(
-          "Asking model to correct itself..."
-        );
-
-        conversationHistory += `
-
-
-==================================================
-FORMAT ERROR
-==================================================
-
-Your previous response was:
-
-${rawResponse}
-
-That response is INVALID.
-
-You MUST return one of these formats.
-
-
-TOOL:
-
-{
-  "action": "tool",
-  "tool": "file",
-  "toolAction": "readFile",
-  "parameters": {
-    "path": "S:\\\\example.txt"
-  }
-}
-
-
-OR:
-
-
-{
-  "action": "tool",
-  "tool": "terminal",
-  "toolAction": "run",
-  "parameters": {
-    "command": "npm run build",
-    "cwd": "S:\\\\project"
-  }
-}
-
-
-WHEN FINISHED:
-
-{
-  "action": "answer",
-  "response": "Task completed successfully."
-}
-
-
-Do not use:
-
-"status"
-"message"
-"details"
-"output"
-
-as top-level response formats.
-
-Do not invent file paths.
-
-Return ONLY valid JSON.
-`;
-
-        continue;
-      }
+      const toolCalls =
+        assistantMessage.tool_calls ??
+        [];
 
       /*
       ========================================
-      FINAL ANSWER
+      NO TOOL CALL = POSSIBLE FINAL ANSWER
       ========================================
       */
 
       if (
-        decision.action ===
-        "answer"
+        toolCalls.length === 0
       ) {
-        return (
-          decision.response
-        );
+        /*
+        A tool failed earlier.
+
+        Do NOT allow the model to simply
+        claim success.
+        */
+
+        if (
+          unresolvedToolFailure &&
+          failureReminderCount < 2
+        ) {
+          this.messages.push({
+            role: "user",
+
+            content: `
+A required tool action in the current task failed.
+
+Do NOT claim that the task succeeded.
+
+Review the previous tool error.
+
+If you can safely correct the problem,
+use the appropriate tool.
+
+If the task cannot be completed,
+clearly tell the user that it failed.
+
+Never invent a successful result.
+`,
+          });
+
+          failureReminderCount++;
+
+          continue;
+        }
+
+        const answer =
+          assistantMessage
+            .content
+            ?.trim();
+
+        if (answer) {
+          return answer;
+        }
+
+        return "Task completed.";
       }
 
       /*
       ========================================
-      TOOL ACTION
+      EXECUTE TOOL CALLS
       ========================================
       */
 
-      if (
-        decision.action ===
-        "tool"
+      let currentBatchFailed =
+        false;
+
+      let currentBatchSucceeded =
+        false;
+
+      for (
+        const toolCall
+        of toolCalls
       ) {
+        const toolName =
+          toolCall.function.name;
+
+        const args =
+          toolCall.function
+            .arguments as Record<
+              string,
+              unknown
+            >;
+
         console.log(
-          `\n🔧 Using tool: ${decision.tool}.${decision.toolAction}`
+          `\n🔧 Native tool call: ${toolName}`
+        );
+
+        console.log(
+          "Arguments:",
+          args
         );
 
         /*
-        ----------------------------------------
+        --------------------------------------
+        MAP NATIVE TOOL
+        --------------------------------------
+        */
+
+        const request =
+          mapNativeToolCall(
+            toolName,
+            args
+          );
+
+        /*
+        --------------------------------------
+        UNKNOWN TOOL
+        --------------------------------------
+        */
+
+        if (!request) {
+          const errorResult = {
+            success: false,
+
+            message:
+              `Unknown tool: ${toolName}`,
+          };
+
+          currentBatchFailed =
+            true;
+
+          this.messages.push({
+            role: "tool",
+
+            tool_name:
+              toolName,
+
+            content:
+              JSON.stringify(
+                errorResult
+              ),
+          });
+
+          continue;
+        }
+
+        /*
+        --------------------------------------
         EXECUTE TOOL
-        ----------------------------------------
+        --------------------------------------
         */
 
         const result =
-          await this.executor.execute({
-            tool:
-              decision.tool,
-
-            action:
-              decision.toolAction,
-
-            parameters:
-              decision.parameters,
-          });
+          await this.executor.execute(
+            request
+          );
 
         console.log(
           "\n🔧 Tool result:"
@@ -466,84 +356,84 @@ Return ONLY valid JSON.
         );
 
         /*
-        ----------------------------------------
-        SEND RESULT BACK TO AI
-        ----------------------------------------
+        --------------------------------------
+        TRACK SUCCESS / FAILURE
+        --------------------------------------
         */
 
-        conversationHistory += `
+        if (result.success) {
+          currentBatchSucceeded =
+            true;
+        } else {
+          currentBatchFailed =
+            true;
+        }
 
+        /*
+        --------------------------------------
+        SAVE TOOL RESULT IN MEMORY
+        --------------------------------------
+        */
 
-==================================================
-PREVIOUS MODEL DECISION
-==================================================
+        this.messages.push({
+          role: "tool",
 
-${rawResponse}
+          tool_name:
+            toolName,
 
+          content:
+            JSON.stringify(
+              result
+            ),
+        });
+      }
 
-==================================================
-TOOL RESULT
-==================================================
+      /*
+      ========================================
+      UPDATE FAILURE STATE
+      ========================================
+      */
 
-${JSON.stringify(
-  result,
-  null,
-  2
-)}
+      if (
+        currentBatchFailed
+      ) {
+        unresolvedToolFailure =
+          true;
+      } else if (
+        currentBatchSucceeded
+      ) {
+        unresolvedToolFailure =
+          false;
 
-
-==================================================
-ORIGINAL USER REQUEST
-==================================================
-
-${userInput}
-
-
-==================================================
-NEXT ACTION
-==================================================
-
-Look at the tool result.
-
-Determine whether the original user request
-has been completely finished.
-
-If more work is required,
-use the next appropriate tool.
-
-If the tool failed,
-inspect the error and try to fix it safely.
-
-If everything succeeded,
-return:
-
-{
-  "action": "answer",
-  "response": "Task completed successfully."
-}
-
-Do not repeat an action that already succeeded.
-
-Do not claim success when:
-
-"success": false
-
-Return ONLY valid JSON.
-`;
-
-        continue;
+        failureReminderCount =
+          0;
       }
     }
-
-    /*
-    ========================================
-    MAX STEPS
-    ========================================
-    */
 
     return (
       "The agent stopped because " +
       "the maximum number of steps was reached."
+    );
+  }
+
+  /*
+  ==========================================
+  CLEAR SHORT-TERM MEMORY
+  ==========================================
+  */
+
+  resetConversation() {
+    this.messages = [
+      {
+        role: "system",
+
+        content:
+          buildSystemPrompt(),
+      },
+    ];
+
+    console.log(
+      "🧠 Conversation memory cleared."
     );
   }
 }
