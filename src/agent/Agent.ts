@@ -30,6 +30,10 @@ import {
 } from "../security/ConsoleApproval.js";
 
 import {
+  MemoryManager,
+} from "../memory/MemoryManager.js";
+
+import {
   Executor,
 } from "./Executor.js";
 
@@ -38,11 +42,19 @@ export class Agent {
 
   /*
   ==========================================
-  CONVERSATION MEMORY
+  SHORT-TERM CONVERSATION MEMORY
   ==========================================
   */
 
   private messages: Message[];
+
+  /*
+  ==========================================
+  LONG-TERM SQLITE MEMORY
+  ==========================================
+  */
+
+  private memoryManager: MemoryManager;
 
   constructor() {
     /*
@@ -66,6 +78,15 @@ export class Agent {
       new Executor(
         permissionManager
       );
+
+    /*
+    ==========================================
+    LONG-TERM MEMORY
+    ==========================================
+    */
+
+    this.memoryManager =
+      new MemoryManager();
 
     /*
     ==========================================
@@ -107,7 +128,7 @@ export class Agent {
 
     /*
     ==========================================
-    START ONE CONTINUOUS CONVERSATION
+    START SHORT-TERM CONVERSATION
     ==========================================
     */
 
@@ -130,21 +151,94 @@ export class Agent {
     userInput: string
   ): Promise<string> {
     /*
-    ------------------------------------------
-    ADD THE NEW USER MESSAGE
-    ------------------------------------------
+    ==========================================
+    SEARCH LONG-TERM MEMORY
+    ==========================================
     */
 
-    this.messages.push({
+    const longTermMemory =
+      this.memoryManager
+        .getContextForPrompt(
+          userInput
+        );
+
+    /*
+    We use a separate message array for
+    this task so long-term memory context
+    doesn't permanently duplicate inside
+    the short-term conversation.
+    */
+
+    const runMessages: Message[] = [
+      ...this.messages,
+    ];
+
+    /*
+    ==========================================
+    ADD RELEVANT LONG-TERM MEMORY
+    ==========================================
+    */
+
+    if (longTermMemory) {
+      runMessages.push({
+        role: "system",
+
+        content: `
+RELEVANT LONG-TERM MEMORY:
+
+${longTermMemory}
+
+Use this memory only when it is relevant
+to the user's current request.
+
+The newest user instruction always has
+priority over old memory.
+
+Old memory may describe something that
+has changed.
+
+Use tools to verify current computer
+state whenever necessary.
+`,
+      });
+    }
+
+    /*
+    ==========================================
+    SAVE USER MESSAGE PERMANENTLY
+    ==========================================
+    */
+
+    this.memoryManager.remember(
+      "user",
+      userInput
+    );
+
+    /*
+    ==========================================
+    ADD USER MESSAGE TO CURRENT SESSION
+    ==========================================
+    */
+
+    const userMessage: Message = {
       role: "user",
       content: userInput,
-    });
+    };
+
+    this.messages.push(
+      userMessage
+    );
+
+    runMessages.push(
+      userMessage
+    );
 
     const MAX_STEPS = 30;
 
     /*
-    If a tool fails, don't allow the model
-    to immediately pretend the task worked.
+    ==========================================
+    FAILURE TRACKING
+    ==========================================
     */
 
     let unresolvedToolFailure =
@@ -173,14 +267,14 @@ export class Agent {
       );
 
       /*
-      ----------------------------------------
-      ASK OLLAMA
-      ----------------------------------------
+      ========================================
+      ASK QWEN THROUGH OLLAMA
+      ========================================
       */
 
       const response =
         await askOllama(
-          this.messages,
+          runMessages,
           agentTools
         );
 
@@ -188,9 +282,14 @@ export class Agent {
         response.message;
 
       /*
-      Save what the model said/called.
-      This is VERY IMPORTANT for memory.
+      ========================================
+      SAVE ASSISTANT MESSAGE
+      ========================================
       */
+
+      runMessages.push(
+        assistantMessage
+      );
 
       this.messages.push(
         assistantMessage
@@ -202,7 +301,7 @@ export class Agent {
 
       /*
       ========================================
-      NO TOOL CALL = POSSIBLE FINAL ANSWER
+      NO TOOL CALL
       ========================================
       */
 
@@ -210,17 +309,15 @@ export class Agent {
         toolCalls.length === 0
       ) {
         /*
-        A tool failed earlier.
-
-        Do NOT allow the model to simply
-        claim success.
+        Prevent fake success after
+        a failed tool action.
         */
 
         if (
           unresolvedToolFailure &&
           failureReminderCount < 2
         ) {
-          this.messages.push({
+          runMessages.push({
             role: "user",
 
             content: `
@@ -251,6 +348,17 @@ Never invent a successful result.
             ?.trim();
 
         if (answer) {
+          /*
+          ====================================
+          SAVE FINAL ANSWER PERMANENTLY
+          ====================================
+          */
+
+          this.memoryManager.remember(
+            "assistant",
+            answer
+          );
+
           return answer;
         }
 
@@ -293,9 +401,9 @@ Never invent a successful result.
         );
 
         /*
-        --------------------------------------
+        ======================================
         MAP NATIVE TOOL
-        --------------------------------------
+        ======================================
         */
 
         const request =
@@ -305,9 +413,9 @@ Never invent a successful result.
           );
 
         /*
-        --------------------------------------
+        ======================================
         UNKNOWN TOOL
-        --------------------------------------
+        ======================================
         */
 
         if (!request) {
@@ -321,7 +429,7 @@ Never invent a successful result.
           currentBatchFailed =
             true;
 
-          this.messages.push({
+          const toolMessage: Message = {
             role: "tool",
 
             tool_name:
@@ -331,15 +439,23 @@ Never invent a successful result.
               JSON.stringify(
                 errorResult
               ),
-          });
+          };
+
+          runMessages.push(
+            toolMessage
+          );
+
+          this.messages.push(
+            toolMessage
+          );
 
           continue;
         }
 
         /*
-        --------------------------------------
-        EXECUTE TOOL
-        --------------------------------------
+        ======================================
+        EXECUTE REAL TOOL
+        ======================================
         */
 
         const result =
@@ -356,9 +472,22 @@ Never invent a successful result.
         );
 
         /*
-        --------------------------------------
+        ======================================
+        SAVE SUCCESSFUL TOOL RESULT
+        TO SQLITE LONG-TERM MEMORY
+        ======================================
+        */
+
+        this.memoryManager
+          .rememberToolResult(
+            toolName,
+            result
+          );
+
+        /*
+        ======================================
         TRACK SUCCESS / FAILURE
-        --------------------------------------
+        ======================================
         */
 
         if (result.success) {
@@ -370,12 +499,12 @@ Never invent a successful result.
         }
 
         /*
-        --------------------------------------
-        SAVE TOOL RESULT IN MEMORY
-        --------------------------------------
+        ======================================
+        SEND TOOL RESULT BACK TO QWEN
+        ======================================
         */
 
-        this.messages.push({
+        const toolMessage: Message = {
           role: "tool",
 
           tool_name:
@@ -385,7 +514,15 @@ Never invent a successful result.
             JSON.stringify(
               result
             ),
-        });
+        };
+
+        runMessages.push(
+          toolMessage
+        );
+
+        this.messages.push(
+          toolMessage
+        );
       }
 
       /*
@@ -418,11 +555,11 @@ Never invent a successful result.
 
   /*
   ==========================================
-  CLEAR SHORT-TERM MEMORY
+  CLEAR SHORT-TERM MEMORY ONLY
   ==========================================
   */
 
-  resetConversation() {
+  resetConversation(): void {
     this.messages = [
       {
         role: "system",
@@ -433,7 +570,7 @@ Never invent a successful result.
     ];
 
     console.log(
-      "🧠 Conversation memory cleared."
+      "🧠 Short-term conversation memory cleared."
     );
   }
 }
