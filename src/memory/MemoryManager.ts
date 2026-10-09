@@ -5,7 +5,8 @@ import {
 } from "./MemoryDatabase.js";
 
 export class MemoryManager {
-  private database: MemoryDatabase;
+  private database:
+    MemoryDatabase;
 
   constructor() {
     this.database =
@@ -37,6 +38,21 @@ export class MemoryManager {
 
   /*
   ==========================================
+  SAVE EXPLICIT MEMORY
+  ==========================================
+  */
+
+  rememberImportant(
+    content: string
+  ): void {
+    this.remember(
+      "memory",
+      content
+    );
+  }
+
+  /*
+  ==========================================
   SAVE SUCCESSFUL TOOL RESULT
   ==========================================
   */
@@ -49,7 +65,6 @@ export class MemoryManager {
       data?: unknown;
     }
   ): void {
-    // Only save successful real actions.
     if (!result.success) {
       return;
     }
@@ -97,7 +112,51 @@ export class MemoryManager {
 
   /*
   ==========================================
-  GET MEMORY FOR CURRENT PROMPT
+  SEARCH MEMORY
+  ==========================================
+  */
+
+  search(
+  query: string,
+  limit = 10
+): MemoryRecord[] {
+  return this.database
+    .searchImportantMemories(
+      query,
+      limit
+    );
+}
+  /*
+  ==========================================
+  GET RECENT MEMORY
+  ==========================================
+  */
+
+  recent(
+    limit = 10
+  ): MemoryRecord[] {
+    return this.database
+      .getRecentMemories(
+        limit
+      );
+  }
+
+  /*
+  ==========================================
+  FORGET ONE MEMORY
+  ==========================================
+  */
+
+  forget(
+    id: number
+  ): boolean {
+    return this.database
+      .deleteMemory(id);
+  }
+
+  /*
+  ==========================================
+  LONG-TERM CONTEXT FOR QWEN
   ==========================================
   */
 
@@ -114,10 +173,6 @@ export class MemoryManager {
           userInput,
           15
         );
-
-    /*
-    Remove duplicate memories.
-    */
 
     const combined =
       new Map<
@@ -160,16 +215,16 @@ export class MemoryManager {
     }
 
     return memories
-      .map(
-        (memory) =>
-          `[${memory.type.toUpperCase()}] ${memory.content}`
-      )
-      .join("\n");
-  }
+  .map(
+    (memory) =>
+      `[${memory.type.toUpperCase()}] ${memory.content}`
+  )
+  .join("\n");
+}
 
   /*
   ==========================================
-  CLEAR ALL MEMORY
+  CLEAR EVERYTHING
   ==========================================
   */
 

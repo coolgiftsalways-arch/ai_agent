@@ -48,3 +48,6 @@ models/
 *.db
 *.sqlite
 *.sqlite3
+
+config/google-credentials.json
+data/gmail-token.json

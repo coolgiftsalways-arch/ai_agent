@@ -27,7 +27,16 @@ export class PermissionManager {
     "file.deleteFolder": "confirm",
 
     // TERMINAL
-    "terminal.run": "confirm",
+"terminal.run": "confirm",
+
+// MEMORY
+"memory.remember": "safe",
+"memory.search": "safe",
+"memory.recent": "safe",
+"memory.forget": "confirm",
+"memory.clearAll": "confirm",
+
+// Future tools
 
     // Future tools
     "gmail.read": "safe",

@@ -1,11 +1,11 @@
-import readline from "readline/promises";
+import {
+  Agent,
+} from "./agent/Agent.js";
 
 import {
-  stdin as input,
-  stdout as output,
-} from "process";
-
-import { Agent } from "./agent/Agent.js";
+  askConsole,
+  closeConsole,
+} from "./utils/ConsoleIO.js";
 
 async function main() {
   console.log(
@@ -35,59 +35,69 @@ async function main() {
   const agent =
     new Agent();
 
-  const rl =
-    readline.createInterface({
-      input,
-      output,
-    });
-
-  while (true) {
-    const userInput =
-      await rl.question(
-        "\nYou: "
-      );
-
-    const command =
-      userInput.trim();
-
-    if (!command) {
-      continue;
-    }
-
-    if (
-      command.toLowerCase() ===
-      "exit"
-    ) {
-      console.log(
-        "\n👋 Agent stopped."
-      );
-
-      break;
-    }
-
-    try {
-      const response =
-        await agent.run(
-          command
+  try {
+    while (true) {
+      const userInput =
+        await askConsole(
+          "\nYou: "
         );
 
-      console.log(
-        "\n🤖 Agent:"
-      );
+      const command =
+        userInput.trim();
 
-      console.log(response);
-    } catch (error) {
-      console.error(
-        "\n❌ Agent error:"
-      );
+      if (!command) {
+        continue;
+      }
 
-      console.error(error);
+      if (
+        command.toLowerCase() ===
+        "exit"
+      ) {
+        console.log(
+          "\n👋 Agent stopped."
+        );
+
+        break;
+      }
+
+      try {
+        const response =
+          await agent.run(
+            command
+          );
+
+        console.log(
+          "\n🤖 Agent:"
+        );
+
+        console.log(
+          response
+        );
+      } catch (error) {
+        console.error(
+          "\n❌ Agent error:"
+        );
+
+        console.error(
+          error
+        );
+      }
     }
+  } finally {
+    closeConsole();
   }
-
-  rl.close();
 }
 
 main().catch(
-  console.error
+  (error) => {
+    console.error(
+      "\n❌ Fatal error:"
+    );
+
+    console.error(
+      error
+    );
+
+    closeConsole();
+  }
 );
