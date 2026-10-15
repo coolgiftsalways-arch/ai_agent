@@ -1,7 +1,5 @@
 import type { Message } from "ollama";
 
-
-
 import { askOllama } from "../ollama/OllamaClient.js";
 
 import { FileTool } from "../tools/FileTool.js";
@@ -9,9 +7,13 @@ import { FileTool } from "../tools/FileTool.js";
 import { TerminalTool } from "../tools/TerminalTool.js";
 
 import {
+
   allAgentTools,
+
   mapAgentToolCall,
+
   validateAgentToolCall,
+
 } from "../tools/AgentToolRouter.js";
 
 import { BrowserTool } from "../tools/BrowserTool.js";
@@ -22,18 +24,13 @@ import { PermissionManager } from "../security/PermissionManager.js";
 
 import { askForApproval } from "../security/ConsoleApproval.js";
 
-
 import { MemoryTool } from "../tools/MemoryTool.js";
 
 import { MemoryManager } from "../memory/MemoryManager.js";
 
 import { GmailTool } from "../tools/GmailTool.js";
 
-
-
 import { Executor } from "./Executor.js";
-
-
 
 import {
 
@@ -44,8 +41,6 @@ import {
 } from "./ToolRequirementDetector.js";
 
 import { detectBrowserRequirement } from "./BrowserRequirementDetector.js";
-
-
 
 import {
 
@@ -61,19 +56,17 @@ import {
 
 } from "./CapabilityResponder.js";
 
+import {
 
+  summarizeBrowserPage,
 
-
+} from "../browser/BrowserSummarizer.js";
 
 type ApprovalFunction = (
 
   message: string
 
 ) => Promise<boolean>;
-
-
-
-
 
 type ToolExecutionResult = {
 
@@ -85,33 +78,19 @@ type ToolExecutionResult = {
 
 };
 
-
-
-
-
 export class Agent {
 
   private executor: Executor;
 
-
-
   private messages: Message[];
-
-
 
   private memoryManager:
 
     MemoryManager;
 
-
-
   private gmailComposeManager:
 
     GmailComposeManager;
-
-
-
-
 
   constructor(
 
@@ -133,8 +112,6 @@ export class Agent {
 
     */
 
-
-
     const permissionManager =
 
       new PermissionManager(
@@ -142,10 +119,6 @@ export class Agent {
         approvalFunction
 
       );
-
-
-
-
 
     /*
 
@@ -157,8 +130,6 @@ export class Agent {
 
     */
 
-
-
     this.executor =
 
       new Executor(
@@ -166,10 +137,6 @@ export class Agent {
         permissionManager
 
       );
-
-
-
-
 
     /*
 
@@ -181,15 +148,9 @@ export class Agent {
 
     */
 
-
-
     this.memoryManager =
 
       new MemoryManager();
-
-
-
-
 
     /*
 
@@ -201,15 +162,9 @@ export class Agent {
 
     */
 
-
-
     this.gmailComposeManager =
 
       new GmailComposeManager();
-
-
-
-
 
     /*
 
@@ -221,8 +176,6 @@ export class Agent {
 
     */
 
-
-
     const fileTool =
 
       new FileTool([
@@ -232,10 +185,6 @@ export class Agent {
         "S:\\\\",
 
       ]);
-
-
-
-
 
     const terminalTool =
 
@@ -247,10 +196,6 @@ export class Agent {
 
       ]);
 
-
-
-
-
     const memoryTool =
 
       new MemoryTool(
@@ -259,23 +204,13 @@ export class Agent {
 
       );
 
-
-
-
-
     const gmailTool =
 
       new GmailTool();
 
-
-
     const browserTool =
 
       new BrowserTool();
-
-
-
-
 
     this.executor.registerTool(
 
@@ -283,19 +218,11 @@ export class Agent {
 
     );
 
-
-
-
-
     this.executor.registerTool(
 
       terminalTool
 
     );
-
-
-
-
 
     this.executor.registerTool(
 
@@ -303,27 +230,17 @@ export class Agent {
 
     );
 
-
-
-
-
     this.executor.registerTool(
 
       gmailTool
 
     );
 
-
-
     this.executor.registerTool(
 
       browserTool
 
     );
-
-
-
-
 
     /*
 
@@ -335,8 +252,6 @@ export class Agent {
 
     */
 
-
-
     this.messages = [
 
       {
@@ -344,8 +259,6 @@ export class Agent {
         role:
 
           "system",
-
-
 
         content:
 
@@ -357,10 +270,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -370,8 +279,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private extractExactFileContent(
 
@@ -391,10 +298,6 @@ export class Agent {
 
       );
 
-
-
-
-
     if (
 
       matches.length !==
@@ -407,27 +310,15 @@ export class Agent {
 
     }
 
-
-
-
-
     const match =
 
       matches[0];
-
-
-
-
 
     const start =
 
       (match.index ?? 0) +
 
       match[0].length;
-
-
-
-
 
     let content =
 
@@ -441,27 +332,15 @@ export class Agent {
 
         .trim();
 
-
-
-
-
     if (!content) {
 
       return null;
 
     }
 
-
-
-
-
     const first =
 
       content[0];
-
-
-
-
 
     const last =
 
@@ -470,10 +349,6 @@ export class Agent {
         content.length - 1
 
       ];
-
-
-
-
 
     if (
 
@@ -505,17 +380,9 @@ export class Agent {
 
     }
 
-
-
-
-
     return content;
 
   }
-
-
-
-
 
   /*
 
@@ -526,8 +393,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private isPermissionDenied(
 
@@ -547,10 +412,6 @@ export class Agent {
 
     }
 
-
-
-
-
     const message =
 
       String(
@@ -561,10 +422,6 @@ export class Agent {
 
       ).toLowerCase();
 
-
-
-
-
     return (
 
       message.includes(
@@ -573,15 +430,11 @@ export class Agent {
 
       ) ||
 
-
-
       message.includes(
 
         "permission was denied"
 
       ) ||
-
-
 
       message.includes(
 
@@ -589,15 +442,11 @@ export class Agent {
 
       ) ||
 
-
-
       message.includes(
 
         "user denied"
 
       ) ||
-
-
 
       message.includes(
 
@@ -609,10 +458,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -622,8 +467,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private isPathSecurityDenied(
 
@@ -643,10 +486,6 @@ export class Agent {
 
     }
 
-
-
-
-
     const message =
 
       String(
@@ -657,10 +496,6 @@ export class Agent {
 
       ).toLowerCase();
 
-
-
-
-
     return (
 
       message.includes(
@@ -669,8 +504,6 @@ export class Agent {
 
       ) &&
 
-
-
       (
 
         message.includes(
@@ -678,8 +511,6 @@ export class Agent {
           "outside allowed"
 
         ) ||
-
-
 
         message.includes(
 
@@ -693,10 +524,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -707,13 +534,9 @@ export class Agent {
 
   */
 
-
-
   private isBlockedTerminalFallback(
 
     toolName: string,
-
-
 
     requirement:
 
@@ -735,23 +558,15 @@ export class Agent {
 
     }
 
-
-
-
-
     return (
 
       requirement.description ===
 
         "file_list_files" ||
 
-
-
       requirement.description ===
 
         "file_read_file" ||
-
-
 
       requirement.description ===
 
@@ -760,10 +575,6 @@ export class Agent {
     );
 
   }
-
-
-
-
 
   /*
 
@@ -775,15 +586,11 @@ export class Agent {
 
   */
 
-
-
   private requirementSatisfied(
 
     requirement:
 
       ToolRequirement | null,
-
-
 
     successfulTools:
 
@@ -800,10 +607,6 @@ export class Agent {
       return true;
 
     }
-
-
-
-
 
     return requirement
 
@@ -827,10 +630,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -840,8 +639,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private saveFinalAnswer(
 
@@ -857,17 +654,9 @@ export class Agent {
 
     );
 
-
-
-
-
     return answer;
 
   }
-
-
-
-
 
   /*
 
@@ -878,8 +667,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private generatedFinalAnswer(
 
@@ -895,27 +682,17 @@ export class Agent {
 
         "assistant",
 
-
-
       content:
 
         answer,
 
     };
 
-
-
-
-
     this.messages.push(
 
       message
 
     );
-
-
-
-
 
     this.memoryManager.remember(
 
@@ -925,25 +702,15 @@ export class Agent {
 
     );
 
-
-
-
-
     return answer;
 
   }
-
-
-
-
 
   /*
 
   ==========================================
 
   PRIVATE FINAL ANSWER
-
-
 
   Used for Gmail and other data that
 
@@ -954,8 +721,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   private generatedPrivateFinalAnswer(
 
@@ -971,17 +736,11 @@ export class Agent {
 
         "assistant",
 
-
-
       content:
 
         answer,
 
     };
-
-
-
-
 
     this.messages.push(
 
@@ -989,17 +748,9 @@ export class Agent {
 
     );
 
-
-
-
-
     return answer;
 
   }
-
-
-
-
 
   /*
 
@@ -1011,21 +762,15 @@ export class Agent {
 
   */
 
-
-
   private addToolMessage(
 
     runMessages:
 
       Message[],
 
-
-
     toolName:
 
       string,
-
-
 
     payload:
 
@@ -1041,13 +786,9 @@ export class Agent {
 
         "tool",
 
-
-
       tool_name:
 
         toolName,
-
-
 
       content:
 
@@ -1059,19 +800,11 @@ export class Agent {
 
     };
 
-
-
-
-
     runMessages.push(
 
       toolMessage
 
     );
-
-
-
-
 
     this.messages.push(
 
@@ -1080,10 +813,6 @@ export class Agent {
     );
 
   }
-
-
-
-
 
   /*
 
@@ -1095,15 +824,11 @@ export class Agent {
 
   */
 
-
-
   private cleanGmailText(
 
     value:
 
       unknown,
-
-
 
     preserveLineBreaks =
 
@@ -1121,43 +846,27 @@ export class Agent {
 
       );
 
-
-
-
-
     /*
 
     Remove tracking-style links:
 
-
-
-    <https\://very-long-link>Google
-
-
+    <https\\\\://very-long-link>Google
 
     becomes:
-
-
 
     Google
 
     */
 
-
-
     text =
 
       text.replace(
 
-       /<https?:\/\/[^>]+>/gi,
+        /<https?:\/\/[^>]+>/gi,
 
         ""
 
       );
-
-
-
-
 
     /*
 
@@ -1165,13 +874,9 @@ export class Agent {
 
     */
 
-
-
     text =
 
       text
-
-
 
         .replace(
 
@@ -1181,8 +886,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /&#x27;/gi,
@@ -1190,8 +893,6 @@ export class Agent {
           "'"
 
         )
-
-
 
         .replace(
 
@@ -1201,8 +902,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /&quot;/gi,
@@ -1210,8 +909,6 @@ export class Agent {
           '"'
 
         )
-
-
 
         .replace(
 
@@ -1221,8 +918,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /&lt;/gi,
@@ -1230,8 +925,6 @@ export class Agent {
           "<"
 
         )
-
-
 
         .replace(
 
@@ -1241,8 +934,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /&amp;/gi,
@@ -1251,17 +942,11 @@ export class Agent {
 
         );
 
-
-
-
-
     /*
 
     Remove invisible email characters.
 
     */
-
-
 
     text =
 
@@ -1273,10 +958,6 @@ export class Agent {
 
       );
 
-
-
-
-
     if (
 
       preserveLineBreaks
@@ -1284,8 +965,6 @@ export class Agent {
     ) {
 
       return text
-
-
 
         .replace(
 
@@ -1295,8 +974,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /\r/g,
@@ -1304,8 +981,6 @@ export class Agent {
           "\n"
 
         )
-
-
 
         .replace(
 
@@ -1315,8 +990,6 @@ export class Agent {
 
         )
 
-
-
         .replace(
 
           /\n{3,}/g,
@@ -1325,19 +998,11 @@ export class Agent {
 
         )
 
-
-
         .trim();
 
     }
 
-
-
-
-
     return text
-
-
 
       .replace(
 
@@ -1347,15 +1012,9 @@ export class Agent {
 
       )
 
-
-
       .trim();
 
   }
-
-
-
-
 
   /*
 
@@ -1367,21 +1026,15 @@ export class Agent {
 
   */
 
-
-
   private formatDirectGmailResult(
 
     toolName:
 
       string,
 
-
-
     result:
 
       ToolExecutionResult,
-
-
 
     userInput:
 
@@ -1392,8 +1045,6 @@ export class Agent {
     if (
 
       !result.success ||
-
-
 
       ![
 
@@ -1415,21 +1066,13 @@ export class Agent {
 
     }
 
-
-
-
-
     if (
 
       !result.data ||
 
-
-
       typeof result.data !==
 
         "object" ||
-
-
 
       Array.isArray(
 
@@ -1443,10 +1086,6 @@ export class Agent {
 
     }
 
-
-
-
-
     const data =
 
       result.data as Record<
@@ -1457,10 +1096,6 @@ export class Agent {
 
       >;
 
-
-
-
-
     /*
 
     ========================================
@@ -1470,8 +1105,6 @@ export class Agent {
     ========================================
 
     */
-
-
 
     if (
 
@@ -1491,10 +1124,6 @@ export class Agent {
 
         );
 
-
-
-
-
       const from =
 
         this.cleanGmailText(
@@ -1503,10 +1132,6 @@ export class Agent {
 
         );
 
-
-
-
-
       const to =
 
         this.cleanGmailText(
@@ -1514,10 +1139,6 @@ export class Agent {
           data.to
 
         );
-
-
-
-
 
       const subject =
 
@@ -1529,10 +1150,6 @@ export class Agent {
 
         );
 
-
-
-
-
       const date =
 
         this.cleanGmailText(
@@ -1540,10 +1157,6 @@ export class Agent {
           data.date
 
         );
-
-
-
-
 
       const body =
 
@@ -1555,15 +1168,9 @@ export class Agent {
 
           "",
 
-
-
           true
 
         );
-
-
-
-
 
       const lines:
 
@@ -1572,10 +1179,6 @@ export class Agent {
         subject,
 
       ];
-
-
-
-
 
       if (from) {
 
@@ -1587,10 +1190,6 @@ export class Agent {
 
       }
 
-
-
-
-
       if (to) {
 
         lines.push(
@@ -1600,10 +1199,6 @@ export class Agent {
         );
 
       }
-
-
-
-
 
       if (date) {
 
@@ -1615,10 +1210,6 @@ export class Agent {
 
       }
 
-
-
-
-
       if (id) {
 
         lines.push(
@@ -1628,10 +1219,6 @@ export class Agent {
         );
 
       }
-
-
-
-
 
       if (body) {
 
@@ -1645,10 +1232,6 @@ export class Agent {
 
       }
 
-
-
-
-
       return lines.join(
 
         "\n"
@@ -1656,10 +1239,6 @@ export class Agent {
       );
 
     }
-
-
-
-
 
     /*
 
@@ -1671,15 +1250,9 @@ export class Agent {
 
     */
 
-
-
     const rawEmails =
 
       data.emails;
-
-
-
-
 
     if (
 
@@ -1695,10 +1268,6 @@ export class Agent {
 
     }
 
-
-
-
-
     if (
 
       rawEmails.length ===
@@ -1711,19 +1280,11 @@ export class Agent {
 
         "gmail_search"
 
-
-
         ? "No matching emails were found."
-
-
 
         : "No recent emails were found.";
 
     }
-
-
-
-
 
     const wantsIds =
 
@@ -1734,10 +1295,6 @@ export class Agent {
           userInput
 
         );
-
-
-
-
 
     const emails =
 
@@ -1755,13 +1312,9 @@ export class Agent {
 
             !email ||
 
-
-
             typeof email !==
 
               "object" ||
-
-
 
             Array.isArray(
 
@@ -1779,10 +1332,6 @@ export class Agent {
 
           }
 
-
-
-
-
           const item =
 
             email as Record<
@@ -1792,10 +1341,6 @@ export class Agent {
               unknown
 
             >;
-
-
-
-
 
           const subject =
 
@@ -1807,10 +1352,6 @@ export class Agent {
 
             );
 
-
-
-
-
           const from =
 
             this.cleanGmailText(
@@ -1818,10 +1359,6 @@ export class Agent {
               item.from
 
             );
-
-
-
-
 
           const date =
 
@@ -1831,10 +1368,6 @@ export class Agent {
 
             );
 
-
-
-
-
           const snippet =
 
             this.cleanGmailText(
@@ -1842,10 +1375,6 @@ export class Agent {
               item.snippet
 
             );
-
-
-
-
 
           const id =
 
@@ -1856,10 +1385,6 @@ export class Agent {
               ""
 
             );
-
-
-
-
 
           const lines:
 
@@ -1873,10 +1398,6 @@ export class Agent {
 
           ];
 
-
-
-
-
           if (from) {
 
             lines.push(
@@ -1887,10 +1408,6 @@ export class Agent {
 
           }
 
-
-
-
-
           if (date) {
 
             lines.push(
@@ -1900,10 +1417,6 @@ export class Agent {
             );
 
           }
-
-
-
-
 
           if (
 
@@ -1921,10 +1434,6 @@ export class Agent {
 
           }
 
-
-
-
-
           if (snippet) {
 
             lines.push(
@@ -1934,10 +1443,6 @@ export class Agent {
             );
 
           }
-
-
-
-
 
           return lines.join(
 
@@ -1949,33 +1454,19 @@ export class Agent {
 
       );
 
-
-
-
-
     const heading =
 
       toolName ===
 
         "gmail_recent"
 
-
-
         ? `Here are your latest ${rawEmails.length} emails:`
 
-
-
         : `Found ${rawEmails.length} matching emails:`;
-
-
-
-
 
     return (
 
       `${heading}\n\n` +
-
-
 
       emails.join(
 
@@ -1987,10 +1478,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -2001,15 +1488,11 @@ export class Agent {
 
   */
 
-
-
   private buildGmailSendSuccess(
 
     result:
 
       ToolExecutionResult,
-
-
 
     args:
 
@@ -2027,21 +1510,15 @@ export class Agent {
 
       result.data &&
 
-
-
       typeof result.data ===
 
         "object" &&
-
-
 
       !Array.isArray(
 
         result.data
 
       )
-
-
 
         ? result.data as Record<
 
@@ -2051,13 +1528,7 @@ export class Agent {
 
           >
 
-
-
         : {};
-
-
-
-
 
     const to =
 
@@ -2071,10 +1542,6 @@ export class Agent {
 
       );
 
-
-
-
-
     const subject =
 
       String(
@@ -2087,10 +1554,6 @@ export class Agent {
 
       );
 
-
-
-
-
     const id =
 
       String(
@@ -2101,19 +1564,11 @@ export class Agent {
 
       );
 
-
-
-
-
     const lines = [
 
       "✅ Email sent successfully.",
 
     ];
-
-
-
-
 
     if (to) {
 
@@ -2125,10 +1580,6 @@ export class Agent {
 
     }
 
-
-
-
-
     if (subject) {
 
       lines.push(
@@ -2138,10 +1589,6 @@ export class Agent {
       );
 
     }
-
-
-
-
 
     if (id) {
 
@@ -2153,10 +1600,6 @@ export class Agent {
 
     }
 
-
-
-
-
     return lines.join(
 
       "\n"
@@ -2164,10 +1607,6 @@ export class Agent {
     );
 
   }
-
-
-
-
 
   /*
 
@@ -2179,7 +1618,116 @@ export class Agent {
 
   */
 
+  /**
+   * Conservative browser fast path. Only commands with an unambiguous intent
+   * are handled without an LLM; all others fall through to the agent loop.
+   * The existing Validator -> Executor -> PermissionManager is ALWAYS used.
+   */
+  private async tryFastBrowserCommand(userInput: string): Promise<string | null> {
+    const input = userInput.trim();
+    let toolName: string | null = null;
+    let args: Record<string, unknown> = {};
+    let summarize = false;
 
+    // URL opening, optionally followed by a homepage summary.
+    const openMatch = input.match(
+      /^(?:please\s+)?(?:open|visit|go\s+to|navigate\s+to)\s+(https?:\/\/[^\s]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?)(?:\s+(?:and\s+)?(?:(?:give\s+me\s+)?(?:a\s+)?(?:short\s+)?(?:summary|summarize|describe)(?:\s+(?:its|the|this)\s+(?:homepage|page|website|site))?))?[.!?]?$/i
+    );
+
+    if (openMatch) {
+      toolName = "browser_open";
+      // Punctuation after a naked domain is not part of the URL.
+      const url = openMatch[1].replace(/[.,!?]+$/, "");
+      args = { url: /^https?:\/\//i.test(url) ? url : `https://${url}` };
+      summarize = /\b(summary|summarize|describe)\b/i.test(input);
+    } else if (/^(?:please\s+)?(?:read|summarize|describe)(?:\s+(?:the|this|current))?\s+(?:webpage|website|page|site|homepage)(?:\s+(?:for\s+me))?[.!?]?$/i.test(input)) {
+      toolName = "browser_read_page";
+      summarize = /\b(summarize|describe)\b/i.test(input);
+    } else if (/^(?:please\s+)?(?:what(?:'s| is)\s+the\s+(?:current\s+)?(?:page\s+)?(?:title|url)|(?:get|show)(?:\s+me)?\s+(?:the\s+)?(?:current\s+)?(?:page\s+)?(?:title|url|page\s+info|browser\s+info))[.!?]?$/i.test(input)) {
+      toolName = "browser_get_info";
+    } else if (/^(?:please\s+)?(?:go\s+back|browser\s+back|back)(?:\s+(?:one\s+)?page)?[.!?]?$/i.test(input)) {
+      toolName = "browser_back";
+    } else if (/^(?:please\s+)?(?:go\s+forward|browser\s+forward|forward)(?:\s+(?:one\s+)?page)?[.!?]?$/i.test(input)) {
+      toolName = "browser_forward";
+    } else if (/^(?:please\s+)?(?:reload|refresh)(?:\s+(?:the\s+)?(?:current\s+)?(?:page|website|browser))?[.!?]?$/i.test(input)) {
+      toolName = "browser_reload";
+    } else if (/^(?:please\s+)?close\s+(?:the\s+)?browser[.!?]?$/i.test(input)) {
+      toolName = "browser_close";
+    }
+
+    if (!toolName) return null;
+
+    const start = performance.now();
+    const validation = validateAgentToolCall(toolName, args);
+    if (!validation.success) {
+      return this.generatedFinalAnswer(`Browser command rejected: ${validation.message}`);
+    }
+
+    const request = mapAgentToolCall(toolName, validation.args);
+    if (!request) return this.generatedFinalAnswer("Unsupported browser action.");
+
+    console.log(`[BrowserFastPath] ${toolName}`);
+    const result = await this.executor.execute(request);
+    if (!result.success) {
+      console.warn("[BrowserFastPath] Failed:", result.message);
+      return this.generatedFinalAnswer(
+        this.isPermissionDenied(result)
+          ? "Permission denied. The browser action was not performed."
+          : `Browser action failed: ${String(result.message ?? "unknown error")}`
+      );
+    }
+
+    let info = result.data as
+      | { title?: string; url?: string; text?: string }
+      | undefined;
+
+    if (toolName === "browser_open" && summarize) {
+      // Do NOT claim to have read the page if Playwright only opened it.
+      // This second read gets its own validation and permission approval.
+      const readValidation = validateAgentToolCall("browser_read_page", {});
+      if (!readValidation.success) {
+        return this.generatedFinalAnswer(`Page read validation failed: ${readValidation.message}`);
+      }
+      const readRequest = mapAgentToolCall("browser_read_page", readValidation.args);
+      if (!readRequest) return this.generatedFinalAnswer("Page reading is unavailable.");
+      const readResult = await this.executor.execute(readRequest);
+      if (!readResult.success) {
+        return this.generatedFinalAnswer(
+          `Opened ${String(info?.url ?? args.url)} but could not read its content: ${String(readResult.message ?? "unknown error")}`
+        );
+      }
+      info = readResult.data as { title?: string; url?: string; text?: string } | undefined;
+    }
+
+    let answer: string;
+    if (summarize) {
+      if (!info?.text?.trim() || !info.url || info.url === "about:blank") {
+        answer = "The browser action succeeded, but I could not read useful page content to summarize. Try again after the page finishes loading.";
+      } else {
+        try {
+          answer = await summarizeBrowserPage(
+            { title: info.title ?? "", url: info.url, text: info.text },
+            userInput
+          );
+        } catch (error) {
+          answer = `The page was opened/read, but summarization failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+    } else if (toolName === "browser_read_page") {
+      answer = info?.text?.trim()
+        ? `Page: ${info.title ?? ""}\nURL: ${info.url ?? ""}\n\n${info.text}`
+        : "The browser returned no readable page text. It may still be loading or the tab may have closed.";
+    } else if (toolName === "browser_get_info" || toolName === "browser_open") {
+      answer = `${toolName === "browser_open" ? "Opened" : "Current page"}: ${info?.title || "(untitled)"}\nURL: ${info?.url ?? args.url ?? "unknown"}`;
+    } else {
+      answer = String(result.message ?? "Browser action completed.");
+    }
+
+    console.log(`[BrowserFastPath] Completed in ${((performance.now() - start) / 1000).toFixed(2)}s`);
+    // Preserve tool result memory behavior for non-sensitive browsing actions.
+    if (toolName !== "browser_close") this.memoryManager.rememberToolResult(toolName, result);
+    return this.generatedFinalAnswer(answer);
+  }
 
   async run(
 
@@ -2197,8 +1745,6 @@ export class Agent {
 
   */
 
-
-
   const userMessage:
 
     Message = {
@@ -2207,27 +1753,17 @@ export class Agent {
 
       "user",
 
-
-
     content:
 
       userInput,
 
   };
 
-
-
-
-
   this.messages.push(
 
     userMessage
 
   );
-
-
-
-
 
   /*
 
@@ -2237,8 +1773,6 @@ export class Agent {
 
   ==========================================
 
-
-
   Do not ask the language model to guess
 
   what the local agent can actually do.
@@ -2247,8 +1781,6 @@ export class Agent {
 
   */
 
-
-
   const capabilityResponse =
 
     getCapabilityResponse(
@@ -2256,10 +1788,6 @@ export class Agent {
       userInput
 
     );
-
-
-
-
 
   if (
 
@@ -2277,10 +1805,6 @@ export class Agent {
 
   }
 
-
-
-
-
   /*
 
   ==========================================
@@ -2290,8 +1814,6 @@ export class Agent {
   ==========================================
 
   */
-
-
 
   const detectedToolRequirement =
 
@@ -2307,10 +1829,6 @@ export class Agent {
 
     );
 
-
-
-
-
   /*
 
   ==========================================
@@ -2321,8 +1839,6 @@ export class Agent {
 
   */
 
-
-
   const gmailCompose =
 
     this.gmailComposeManager
@@ -2330,8 +1846,6 @@ export class Agent {
       .process(
 
         userInput,
-
-
 
         detectedToolRequirement
 
@@ -2341,20 +1855,11 @@ export class Agent {
 
       );
 
-
-
-
-
-
     /*
 
     Gmail compose follow-up question.
 
-
-
     Example:
-
-
 
     Send an email
 
@@ -2363,8 +1868,6 @@ export class Agent {
     What email address should I send it to?
 
     */
-
-
 
     if (
 
@@ -2384,10 +1887,6 @@ export class Agent {
 
     }
 
-
-
-
-
     /*
 
     ==========================================
@@ -2398,29 +1897,17 @@ export class Agent {
 
     */
 
-
-
     const resolvedGmailDraft:
 
       GmailDraft | null =
-
-
 
       gmailCompose.kind ===
 
         "ready"
 
-
-
         ? gmailCompose.draft
 
-
-
         : null;
-
-
-
-
 
     /*
 
@@ -2430,17 +1917,11 @@ export class Agent {
 
     */
 
-
-
     const toolRequirement:
 
       ToolRequirement | null =
 
-
-
       resolvedGmailDraft
-
-
 
         ? {
 
@@ -2450,21 +1931,13 @@ export class Agent {
 
             ],
 
-
-
             description:
 
               "gmail_send",
 
           }
 
-
-
         : detectedToolRequirement;
-
-
-
-
 
     /*
 
@@ -2476,8 +1949,6 @@ export class Agent {
 
     */
 
-
-
     const exactRequestedContent =
 
       this.extractExactFileContent(
@@ -2485,10 +1956,6 @@ export class Agent {
         userInput
 
       );
-
-
-
-
 
     /*
 
@@ -2500,8 +1967,6 @@ export class Agent {
 
     */
 
-
-
     const longTermMemory =
 
       this.memoryManager
@@ -2512,17 +1977,11 @@ export class Agent {
 
         );
 
-
-
-
-
     /*
 
     The current user message was already
 
     added to this.messages.
-
-
 
     Remove it temporarily so memory context
 
@@ -2531,8 +1990,6 @@ export class Agent {
     message.
 
     */
-
-
 
     const runMessages:
 
@@ -2548,10 +2005,6 @@ export class Agent {
 
     ];
 
-
-
-
-
     if (
 
       longTermMemory
@@ -2564,17 +2017,11 @@ export class Agent {
 
           "system",
 
-
-
         content: `
 
 RELEVANT LONG-TERM MEMORY:
 
-
-
 ${longTermMemory}
-
-
 
 Use this memory only when relevant.
 
@@ -2590,19 +2037,11 @@ For current computer state, use real tools.
 
     }
 
-
-
-
-
     runMessages.push(
 
       userMessage
 
     );
-
-
-
-
 
     /*
 
@@ -2612,8 +2051,6 @@ For current computer state, use real tools.
 
     ==========================================
 
-
-
     Gmail compose/send contents are NOT
 
     automatically written to SQLite memory.
@@ -2622,8 +2059,6 @@ For current computer state, use real tools.
 
     */
 
-
-
     if (
 
       toolRequirement
@@ -2631,8 +2066,6 @@ For current computer state, use real tools.
         ?.description !==
 
         "gmail_send" &&
-
-
 
       gmailCompose.kind ===
 
@@ -2652,10 +2085,6 @@ For current computer state, use real tools.
 
     }
 
-
-
-
-
     /*
 
     ==========================================
@@ -2666,15 +2095,12 @@ For current computer state, use real tools.
 
     */
 
-
+    const fastBrowserAnswer = await this.tryFastBrowserCommand(userInput);
+    if (fastBrowserAnswer !== null) return fastBrowserAnswer;
 
     const successfulTools =
 
       new Set<string>();
-
-
-
-
 
     const successfulToolCalls =
 
@@ -2686,41 +2112,21 @@ For current computer state, use real tools.
 
       >();
 
-
-
-
-
     const MAX_STEPS =
 
       30;
-
-
-
-
 
     let unresolvedToolFailure =
 
       false;
 
-
-
-
-
     let failureReminderCount =
 
       0;
 
-
-
-
-
     let toolRequirementReminderCount =
 
       0;
-
-
-
-
 
     /*
 
@@ -2732,19 +2138,13 @@ For current computer state, use real tools.
 
     */
 
-
-
     for (
 
       let step = 1;
 
-
-
       step <=
 
         MAX_STEPS;
-
-
 
       step++
 
@@ -2756,19 +2156,11 @@ For current computer state, use real tools.
 
       );
 
-
-
-
-
       console.log(
 
         "Thinking..."
 
       );
-
-
-
-
 
       /*
 
@@ -2776,13 +2168,9 @@ For current computer state, use real tools.
 
       ASK OLLAMA
 
-
-
       Normal chat:
 
       qwen3:1.7b
-
-
 
       Real tool task:
 
@@ -2792,23 +2180,17 @@ For current computer state, use real tools.
 
       */
 
-
-
       const response =
 
         await askOllama(
 
           runMessages,
 
-
-
           toolRequirement
 
             ? allAgentTools
 
             : [],
-
-
 
           toolRequirement
 
@@ -2818,17 +2200,9 @@ For current computer state, use real tools.
 
         );
 
-
-
-
-
       const assistantMessage =
 
         response.message;
-
-
-
-
 
       const toolCalls =
 
@@ -2838,19 +2212,11 @@ For current computer state, use real tools.
 
         [];
 
-
-
-
-
       runMessages.push(
 
         assistantMessage
 
       );
-
-
-
-
 
       /*
 
@@ -2861,8 +2227,6 @@ For current computer state, use real tools.
       ========================================
 
       */
-
-
 
       if (
 
@@ -2877,8 +2241,6 @@ For current computer state, use real tools.
         Previous required tool failed.
 
         */
-
-
 
         if (
 
@@ -2900,31 +2262,19 @@ For current computer state, use real tools.
 
                 "system",
 
-
-
               content: `
 
 A required tool action failed.
 
-
-
 Do NOT claim success.
 
-
-
 Review the tool error.
-
-
 
 If it can be corrected safely,
 
 use the correct tool.
 
-
-
 Do NOT bypass security restrictions.
-
-
 
 If the task cannot be completed,
 
@@ -2934,23 +2284,11 @@ clearly report failure.
 
             });
 
-
-
-
-
             failureReminderCount++;
-
-
-
-
 
             continue;
 
           }
-
-
-
-
 
           return this
 
@@ -2962,10 +2300,6 @@ clearly report failure.
 
         }
 
-
-
-
-
         /*
 
         ======================================
@@ -2975,8 +2309,6 @@ clearly report failure.
         ======================================
 
         */
-
-
 
         if (
 
@@ -3004,31 +2336,19 @@ clearly report failure.
 
                 "system",
 
-
-
               content: `
 
 REQUIRED TOOL GUARD
 
-
-
 The user's request requires a real tool action.
-
-
 
 Required tool/action:
 
 ${toolRequirement?.description ?? "unknown"}
 
-
-
 The required tool has NOT successfully executed yet.
 
-
-
 Do not claim success.
-
-
 
 Call the appropriate tool now.
 
@@ -3036,23 +2356,11 @@ Call the appropriate tool now.
 
             });
 
-
-
-
-
             toolRequirementReminderCount++;
-
-
-
-
 
             continue;
 
           }
-
-
-
-
 
           return this
 
@@ -3064,10 +2372,6 @@ Call the appropriate tool now.
 
         }
 
-
-
-
-
         /*
 
         ======================================
@@ -3078,8 +2382,6 @@ Call the appropriate tool now.
 
         */
 
-
-
         const answer =
 
           assistantMessage
@@ -3088,10 +2390,6 @@ Call the appropriate tool now.
 
             ?.trim();
 
-
-
-
-
         if (answer) {
 
           this.messages.push(
@@ -3099,10 +2397,6 @@ Call the appropriate tool now.
             assistantMessage
 
           );
-
-
-
-
 
           return this
 
@@ -3113,10 +2407,6 @@ Call the appropriate tool now.
             );
 
         }
-
-
-
-
 
         if (
 
@@ -3136,10 +2426,6 @@ Call the appropriate tool now.
 
         }
 
-
-
-
-
         return this
 
           .generatedFinalAnswer(
@@ -3150,10 +2436,6 @@ Call the appropriate tool now.
 
       }
 
-
-
-
-
       /*
 
       Tool-call assistant message
@@ -3162,33 +2444,19 @@ Call the appropriate tool now.
 
       */
 
-
-
       this.messages.push(
 
         assistantMessage
 
       );
 
-
-
-
-
       let currentBatchFailed =
 
         false;
 
-
-
-
-
       let currentBatchSucceeded =
 
         false;
-
-
-
-
 
       /*
 
@@ -3199,8 +2467,6 @@ Call the appropriate tool now.
       ========================================
 
       */
-
-
 
       for (
 
@@ -3214,10 +2480,6 @@ Call the appropriate tool now.
 
           toolCall.function.name;
 
-
-
-
-
         const rawArgs:
 
           unknown =
@@ -3225,10 +2487,6 @@ Call the appropriate tool now.
           toolCall.function
 
             .arguments;
-
-
-
-
 
         /*
 
@@ -3240,17 +2498,11 @@ Call the appropriate tool now.
 
         */
 
-
-
         let candidateArgs:
 
           unknown =
 
           rawArgs;
-
-
-
-
 
         if (
 
@@ -3258,13 +2510,9 @@ Call the appropriate tool now.
 
             null &&
 
-
-
           typeof rawArgs ===
 
             "object" &&
-
-
 
           !Array.isArray(
 
@@ -3298,10 +2546,6 @@ Call the appropriate tool now.
 
           };
 
-
-
-
-
           /*
 
           ====================================
@@ -3312,23 +2556,17 @@ Call the appropriate tool now.
 
           */
 
-
-
           if (
 
             exactRequestedContent !==
 
               null &&
 
-
-
             (
 
               toolName ===
 
                 "file_write_file" ||
-
-
 
               toolName ===
 
@@ -3344,19 +2582,11 @@ Call the appropriate tool now.
 
           }
 
-
-
-
-
           candidateArgs =
 
             clonedArgs;
 
         }
-
-
-
-
 
         /*
 
@@ -3366,11 +2596,7 @@ Call the appropriate tool now.
 
         ======================================
 
-
-
         Qwen cannot decide:
-
-
 
         recipient
 
@@ -3378,15 +2604,11 @@ Call the appropriate tool now.
 
         body
 
-
-
         Only GmailComposeManager can.
 
         ======================================
 
         */
-
-
 
         if (
 
@@ -3408,17 +2630,11 @@ Call the appropriate tool now.
 
                 false,
 
-
-
               message:
 
                 "gmail_send blocked because recipient, subject, and message were not completed by the Gmail compose flow.",
 
             };
-
-
-
-
 
             console.log(
 
@@ -3426,19 +2642,11 @@ Call the appropriate tool now.
 
             );
 
-
-
-
-
             console.log(
 
               blockedResult
 
             );
-
-
-
-
 
             this.addToolMessage(
 
@@ -3450,25 +2658,13 @@ Call the appropriate tool now.
 
             );
 
-
-
-
-
             currentBatchFailed =
 
               true;
 
-
-
-
-
             continue;
 
           }
-
-
-
-
 
           candidateArgs = {
 
@@ -3476,21 +2672,15 @@ Call the appropriate tool now.
 
               candidateArgs &&
 
-
-
               typeof candidateArgs ===
 
                 "object" &&
-
-
 
               !Array.isArray(
 
                 candidateArgs
 
               )
-
-
 
                 ? candidateArgs as Record<
 
@@ -3500,31 +2690,17 @@ Call the appropriate tool now.
 
                   >
 
-
-
                 : {}
 
             ),
-
-
-
-
 
             to:
 
               resolvedGmailDraft.to,
 
-
-
-
-
             subject:
 
               resolvedGmailDraft.subject,
-
-
-
-
 
             body:
 
@@ -3533,10 +2709,6 @@ Call the appropriate tool now.
           };
 
         }
-
-
-
-
 
         /*
 
@@ -3548,8 +2720,6 @@ Call the appropriate tool now.
 
         */
 
-
-
         const validation =
 
           validateAgentToolCall(
@@ -3559,10 +2729,6 @@ Call the appropriate tool now.
             candidateArgs
 
           );
-
-
-
-
 
         if (
 
@@ -3576,17 +2742,11 @@ Call the appropriate tool now.
 
               false,
 
-
-
             message:
 
               validation.message,
 
           };
-
-
-
-
 
           console.log(
 
@@ -3594,19 +2754,11 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           console.log(
 
             validationResult
 
           );
-
-
-
-
 
           this.addToolMessage(
 
@@ -3618,33 +2770,17 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           currentBatchFailed =
 
             true;
-
-
-
-
 
           continue;
 
         }
 
-
-
-
-
         const args =
 
           validation.args;
-
-
-
-
 
         /*
 
@@ -3656,8 +2792,6 @@ Call the appropriate tool now.
 
         */
 
-
-
         const toolCallKey =
 
           `${toolName}:${JSON.stringify(
@@ -3666,10 +2800,6 @@ Call the appropriate tool now.
 
           )}`;
 
-
-
-
-
         const previousSuccessfulResult =
 
           successfulToolCalls.get(
@@ -3677,10 +2807,6 @@ Call the appropriate tool now.
             toolCallKey
 
           );
-
-
-
-
 
         if (
 
@@ -3694,31 +2820,19 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           this.addToolMessage(
 
             runMessages,
 
-
-
             toolName,
-
-
 
             {
 
               ...previousSuccessfulResult,
 
-
-
               message:
 
                 "This exact tool call already succeeded. Use the previous result and answer the user now. Do not call the same tool again with the same arguments.",
-
-
 
               executedArguments:
 
@@ -3728,17 +2842,11 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           runMessages.push({
 
             role:
 
               "system",
-
-
 
             content:
 
@@ -3746,37 +2854,21 @@ Call the appropriate tool now.
 
           });
 
-
-
-
-
           successfulTools.add(
 
             toolName
 
           );
 
-
-
-
-
           continue;
 
         }
-
-
-
-
 
         console.log(
 
           `\n🔧 Agent tool call: ${toolName}`
 
         );
-
-
-
-
 
         console.log(
 
@@ -3785,10 +2877,6 @@ Call the appropriate tool now.
           args
 
         );
-
-
-
-
 
         /*
 
@@ -3799,8 +2887,6 @@ Call the appropriate tool now.
         ======================================
 
         */
-
-
 
         if (
 
@@ -3820,17 +2906,11 @@ Call the appropriate tool now.
 
               false,
 
-
-
             message:
 
               "Terminal fallback is not allowed for this file-system request. Use the required FileTool.",
 
           };
-
-
-
-
 
           console.log(
 
@@ -3838,19 +2918,11 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           console.log(
 
             blockedResult
 
           );
-
-
-
-
 
           this.addToolMessage(
 
@@ -3862,25 +2934,13 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           currentBatchFailed =
 
             true;
 
-
-
-
-
           continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3892,8 +2952,6 @@ Call the appropriate tool now.
 
         */
 
-
-
         const request =
 
           mapAgentToolCall(
@@ -3903,10 +2961,6 @@ Call the appropriate tool now.
             args
 
           );
-
-
-
-
 
         if (
 
@@ -3920,17 +2974,11 @@ Call the appropriate tool now.
 
               false,
 
-
-
             message:
 
               `Unknown tool: ${toolName}`,
 
           };
-
-
-
-
 
           this.addToolMessage(
 
@@ -3942,25 +2990,13 @@ Call the appropriate tool now.
 
           );
 
-
-
-
-
           currentBatchFailed =
 
             true;
 
-
-
-
-
           continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3972,8 +3008,6 @@ Call the appropriate tool now.
 
         */
 
-
-
         const result =
 
           await this.executor
@@ -3984,29 +3018,17 @@ Call the appropriate tool now.
 
             );
 
-
-
-
-
         console.log(
 
           "\n🔧 Tool result:"
 
         );
 
-
-
-
-
         console.log(
 
           result
 
         );
-
-
-
-
 
         /*
 
@@ -4016,23 +3038,15 @@ Call the appropriate tool now.
 
         */
 
-
-
         this.addToolMessage(
 
           runMessages,
 
-
-
           toolName,
-
-
 
           {
 
             ...result,
-
-
 
             executedArguments:
 
@@ -4041,10 +3055,6 @@ Call the appropriate tool now.
           }
 
         );
-
-
-
-
 
         /*
 
@@ -4055,8 +3065,6 @@ Call the appropriate tool now.
         ======================================
 
         */
-
-
 
         if (
 
@@ -4082,10 +3090,6 @@ Call the appropriate tool now.
 
           }
 
-
-
-
-
           return this
 
             .generatedFinalAnswer(
@@ -4096,10 +3100,6 @@ Call the appropriate tool now.
 
         }
 
-
-
-
-
         /*
 
         ======================================
@@ -4109,8 +3109,6 @@ Call the appropriate tool now.
         ======================================
 
         */
-
-
 
         if (
 
@@ -4136,10 +3134,6 @@ Call the appropriate tool now.
 
         }
 
-
-
-
-
         /*
 
         ======================================
@@ -4149,8 +3143,6 @@ Call the appropriate tool now.
         ======================================
 
         */
-
-
 
         if (
 
@@ -4162,25 +3154,15 @@ Call the appropriate tool now.
 
             true;
 
-
-
-
-
           successfulTools.add(
 
             toolName
 
           );
 
-
-
-
-
           successfulToolCalls.set(
 
             toolCallKey,
-
-
 
             {
 
@@ -4188,13 +3170,9 @@ Call the appropriate tool now.
 
                 result.success,
 
-
-
               message:
 
                 result.message,
-
-
 
               data:
 
@@ -4204,9 +3182,83 @@ Call the appropriate tool now.
 
           );
 
+          /*
 
+           ====================================
 
+           HUMAN-READABLE WEBSITE SUMMARY
 
+           ====================================
+
+           Preserve raw-text requests and
+
+           allow multi-site workflows to
+
+           continue through the agent loop.
+
+           */
+
+          if (toolName === "browser_read_page") {
+
+            const page = result.data as
+
+              | { title?: string; url?: string; text?: string }
+
+              | undefined;
+
+            const wantsRawText =
+
+              /\b(raw text|exact text|full text|verbatim|extract all text|copy all text|show all text)\b/i.test(userInput);
+
+            const wantsAnalysis =
+
+              /\b(summarize|summary|explain|analyze|review|read|what is|what does|tell me about|describe)\b/i.test(userInput);
+
+            const isMultiPageTask =
+
+              /\b(compare|multiple websites|several websites|all websites|research [0-9]+|visit [0-9]+|each website|both websites)\b/i.test(userInput);
+
+            if (
+
+              wantsAnalysis &&
+
+              !wantsRawText &&
+
+              !isMultiPageTask &&
+
+              typeof page?.title === "string" &&
+
+              typeof page.url === "string" &&
+
+              typeof page.text === "string" &&
+
+              page.text.trim().length > 0
+
+            ) {
+
+              try {
+
+                const summary = await summarizeBrowserPage(
+
+                  { title: page.title, url: page.url, text: page.text },
+
+                  userInput
+
+                );
+
+                return this.generatedFinalAnswer(summary);
+
+              } catch (error) {
+
+                console.error("Website summary failed:", error);
+
+                // Existing agent flow provides a fallback answer.
+
+              }
+
+            }
+
+          }
 
           /*
 
@@ -4217,8 +3269,6 @@ Call the appropriate tool now.
           ====================================
 
           */
-
-
 
           if (
 
@@ -4231,10 +3281,6 @@ Call the appropriate tool now.
             this.gmailComposeManager
 
               .clear();
-
-
-
-
 
             return this
 
@@ -4252,10 +3298,6 @@ Call the appropriate tool now.
 
           }
 
-
-
-
-
           /*
 
           ====================================
@@ -4266,21 +3308,15 @@ Call the appropriate tool now.
 
           */
 
-
-
           if (
 
             toolName ===
 
               "gmail_recent" ||
 
-
-
             toolName ===
 
               "gmail_search" ||
-
-
 
             toolName ===
 
@@ -4300,10 +3336,6 @@ Call the appropriate tool now.
 
               );
 
-
-
-
-
             if (
 
               gmailAnswer
@@ -4322,10 +3354,6 @@ Call the appropriate tool now.
 
           }
 
-
-
-
-
           /*
 
           Do not duplicate explicit
@@ -4336,8 +3364,6 @@ Call the appropriate tool now.
 
           */
 
-
-
           if (
 
             !toolName.startsWith(
@@ -4345,8 +3371,6 @@ Call the appropriate tool now.
               "memory_"
 
             ) &&
-
-
 
             !toolName.startsWith(
 
@@ -4370,8 +3394,6 @@ Call the appropriate tool now.
 
         }
 
-
-
         else {
 
           currentBatchFailed =
@@ -4381,10 +3403,6 @@ Call the appropriate tool now.
         }
 
       }
-
-
-
-
 
       /*
 
@@ -4396,8 +3414,6 @@ Call the appropriate tool now.
 
       */
 
-
-
       const requirementSatisfied =
 
         this.requirementSatisfied(
@@ -4407,10 +3423,6 @@ Call the appropriate tool now.
           successfulTools
 
         );
-
-
-
-
 
       if (
 
@@ -4426,8 +3438,6 @@ Call the appropriate tool now.
 
       }
 
-
-
       else if (
 
         currentBatchSucceeded
@@ -4438,10 +3448,6 @@ Call the appropriate tool now.
 
           false;
 
-
-
-
-
         failureReminderCount =
 
           0;
@@ -4449,10 +3455,6 @@ Call the appropriate tool now.
       }
 
     }
-
-
-
-
 
     /*
 
@@ -4464,8 +3466,6 @@ Call the appropriate tool now.
 
     */
 
-
-
     return this
 
       .generatedFinalAnswer(
@@ -4475,10 +3475,6 @@ Call the appropriate tool now.
       );
 
   }
-
-
-
-
 
   /*
 
@@ -4490,8 +3486,6 @@ Call the appropriate tool now.
 
   */
 
-
-
   resetConversation():
 
     void {
@@ -4502,15 +3496,9 @@ Call the appropriate tool now.
 
     */
 
-
-
     this.gmailComposeManager
 
       .clear();
-
-
-
-
 
     /*
 
@@ -4520,8 +3508,6 @@ Call the appropriate tool now.
 
     */
 
-
-
     this.messages = [
 
       {
@@ -4530,8 +3516,6 @@ Call the appropriate tool now.
 
           "system",
 
-
-
         content:
 
           buildSystemPrompt(),
@@ -4539,10 +3523,6 @@ Call the appropriate tool now.
       },
 
     ];
-
-
-
-
 
     console.log(
 

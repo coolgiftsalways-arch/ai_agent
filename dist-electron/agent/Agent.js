@@ -14,6 +14,7 @@ import { detectToolRequirement, } from "./ToolRequirementDetector.js";
 import { detectBrowserRequirement } from "./BrowserRequirementDetector.js";
 import { GmailComposeManager, } from "./GmailComposeManager.js";
 import { getCapabilityResponse, } from "./CapabilityResponder.js";
+import { summarizeBrowserPage, } from "../browser/BrowserSummarizer.js";
 export class Agent {
     executor;
     messages;
@@ -256,8 +257,6 @@ export class Agent {
   
     PRIVATE FINAL ANSWER
   
-  
-  
     Used for Gmail and other data that
   
     should not automatically enter
@@ -309,15 +308,9 @@ export class Agent {
     
         Remove tracking-style links:
     
-    
-    
-        <https\://very-long-link>Google
-    
-    
+        <https\\\\://very-long-link>Google
     
         becomes:
-    
-    
     
         Google
     
@@ -533,6 +526,110 @@ export class Agent {
     ==========================================
   
     */
+    /**
+     * Conservative browser fast path. Only commands with an unambiguous intent
+     * are handled without an LLM; all others fall through to the agent loop.
+     * The existing Validator -> Executor -> PermissionManager is ALWAYS used.
+     */
+    async tryFastBrowserCommand(userInput) {
+        const input = userInput.trim();
+        let toolName = null;
+        let args = {};
+        let summarize = false;
+        // URL opening, optionally followed by a homepage summary.
+        const openMatch = input.match(/^(?:please\s+)?(?:open|visit|go\s+to|navigate\s+to)\s+(https?:\/\/[^\s]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?)(?:\s+(?:and\s+)?(?:(?:give\s+me\s+)?(?:a\s+)?(?:short\s+)?(?:summary|summarize|describe)(?:\s+(?:its|the|this)\s+(?:homepage|page|website|site))?))?[.!?]?$/i);
+        if (openMatch) {
+            toolName = "browser_open";
+            // Punctuation after a naked domain is not part of the URL.
+            const url = openMatch[1].replace(/[.,!?]+$/, "");
+            args = { url: /^https?:\/\//i.test(url) ? url : `https://${url}` };
+            summarize = /\b(summary|summarize|describe)\b/i.test(input);
+        }
+        else if (/^(?:please\s+)?(?:read|summarize|describe)(?:\s+(?:the|this|current))?\s+(?:webpage|website|page|site|homepage)(?:\s+(?:for\s+me))?[.!?]?$/i.test(input)) {
+            toolName = "browser_read_page";
+            summarize = /\b(summarize|describe)\b/i.test(input);
+        }
+        else if (/^(?:please\s+)?(?:what(?:'s| is)\s+the\s+(?:current\s+)?(?:page\s+)?(?:title|url)|(?:get|show)(?:\s+me)?\s+(?:the\s+)?(?:current\s+)?(?:page\s+)?(?:title|url|page\s+info|browser\s+info))[.!?]?$/i.test(input)) {
+            toolName = "browser_get_info";
+        }
+        else if (/^(?:please\s+)?(?:go\s+back|browser\s+back|back)(?:\s+(?:one\s+)?page)?[.!?]?$/i.test(input)) {
+            toolName = "browser_back";
+        }
+        else if (/^(?:please\s+)?(?:go\s+forward|browser\s+forward|forward)(?:\s+(?:one\s+)?page)?[.!?]?$/i.test(input)) {
+            toolName = "browser_forward";
+        }
+        else if (/^(?:please\s+)?(?:reload|refresh)(?:\s+(?:the\s+)?(?:current\s+)?(?:page|website|browser))?[.!?]?$/i.test(input)) {
+            toolName = "browser_reload";
+        }
+        else if (/^(?:please\s+)?close\s+(?:the\s+)?browser[.!?]?$/i.test(input)) {
+            toolName = "browser_close";
+        }
+        if (!toolName)
+            return null;
+        const start = performance.now();
+        const validation = validateAgentToolCall(toolName, args);
+        if (!validation.success) {
+            return this.generatedFinalAnswer(`Browser command rejected: ${validation.message}`);
+        }
+        const request = mapAgentToolCall(toolName, validation.args);
+        if (!request)
+            return this.generatedFinalAnswer("Unsupported browser action.");
+        console.log(`[BrowserFastPath] ${toolName}`);
+        const result = await this.executor.execute(request);
+        if (!result.success) {
+            console.warn("[BrowserFastPath] Failed:", result.message);
+            return this.generatedFinalAnswer(this.isPermissionDenied(result)
+                ? "Permission denied. The browser action was not performed."
+                : `Browser action failed: ${String(result.message ?? "unknown error")}`);
+        }
+        let info = result.data;
+        if (toolName === "browser_open" && summarize) {
+            // Do NOT claim to have read the page if Playwright only opened it.
+            // This second read gets its own validation and permission approval.
+            const readValidation = validateAgentToolCall("browser_read_page", {});
+            if (!readValidation.success) {
+                return this.generatedFinalAnswer(`Page read validation failed: ${readValidation.message}`);
+            }
+            const readRequest = mapAgentToolCall("browser_read_page", readValidation.args);
+            if (!readRequest)
+                return this.generatedFinalAnswer("Page reading is unavailable.");
+            const readResult = await this.executor.execute(readRequest);
+            if (!readResult.success) {
+                return this.generatedFinalAnswer(`Opened ${String(info?.url ?? args.url)} but could not read its content: ${String(readResult.message ?? "unknown error")}`);
+            }
+            info = readResult.data;
+        }
+        let answer;
+        if (summarize) {
+            if (!info?.text?.trim() || !info.url || info.url === "about:blank") {
+                answer = "The browser action succeeded, but I could not read useful page content to summarize. Try again after the page finishes loading.";
+            }
+            else {
+                try {
+                    answer = await summarizeBrowserPage({ title: info.title ?? "", url: info.url, text: info.text }, userInput);
+                }
+                catch (error) {
+                    answer = `The page was opened/read, but summarization failed: ${error instanceof Error ? error.message : String(error)}`;
+                }
+            }
+        }
+        else if (toolName === "browser_read_page") {
+            answer = info?.text?.trim()
+                ? `Page: ${info.title ?? ""}\nURL: ${info.url ?? ""}\n\n${info.text}`
+                : "The browser returned no readable page text. It may still be loading or the tab may have closed.";
+        }
+        else if (toolName === "browser_get_info" || toolName === "browser_open") {
+            answer = `${toolName === "browser_open" ? "Opened" : "Current page"}: ${info?.title || "(untitled)"}\nURL: ${info?.url ?? args.url ?? "unknown"}`;
+        }
+        else {
+            answer = String(result.message ?? "Browser action completed.");
+        }
+        console.log(`[BrowserFastPath] Completed in ${((performance.now() - start) / 1000).toFixed(2)}s`);
+        // Preserve tool result memory behavior for non-sensitive browsing actions.
+        if (toolName !== "browser_close")
+            this.memoryManager.rememberToolResult(toolName, result);
+        return this.generatedFinalAnswer(answer);
+    }
     async run(userInput) {
         /*
       
@@ -555,8 +652,6 @@ export class Agent {
         KNOWN CAPABILITY RESPONSES
       
         ==========================================
-      
-      
       
         Do not ask the language model to guess
       
@@ -598,11 +693,7 @@ export class Agent {
     
         Gmail compose follow-up question.
     
-    
-    
         Example:
-    
-    
     
         Send an email
     
@@ -671,8 +762,6 @@ export class Agent {
     
         added to this.messages.
     
-    
-    
         Remove it temporarily so memory context
     
         can be inserted BEFORE the current user
@@ -690,11 +779,7 @@ export class Agent {
 
 RELEVANT LONG-TERM MEMORY:
 
-
-
 ${longTermMemory}
-
-
 
 Use this memory only when relevant.
 
@@ -715,8 +800,6 @@ For current computer state, use real tools.
         SAVE USER MEMORY
     
         ==========================================
-    
-    
     
         Gmail compose/send contents are NOT
     
@@ -742,6 +825,9 @@ For current computer state, use real tools.
         ==========================================
     
         */
+        const fastBrowserAnswer = await this.tryFastBrowserCommand(userInput);
+        if (fastBrowserAnswer !== null)
+            return fastBrowserAnswer;
         const successfulTools = new Set();
         const successfulToolCalls = new Map();
         const MAX_STEPS = 30;
@@ -767,13 +853,9 @@ For current computer state, use real tools.
       
             ASK OLLAMA
       
-      
-      
             Normal chat:
       
             qwen3:1.7b
-      
-      
       
             Real tool task:
       
@@ -817,25 +899,15 @@ For current computer state, use real tools.
 
 A required tool action failed.
 
-
-
 Do NOT claim success.
 
-
-
 Review the tool error.
-
-
 
 If it can be corrected safely,
 
 use the correct tool.
 
-
-
 Do NOT bypass security restrictions.
-
-
 
 If the task cannot be completed,
 
@@ -867,25 +939,15 @@ clearly report failure.
 
 REQUIRED TOOL GUARD
 
-
-
 The user's request requires a real tool action.
-
-
 
 Required tool/action:
 
 ${toolRequirement?.description ?? "unknown"}
 
-
-
 The required tool has NOT successfully executed yet.
 
-
-
 Do not claim success.
-
-
 
 Call the appropriate tool now.
 
@@ -992,19 +1054,13 @@ Call the appropriate tool now.
         
                 ======================================
         
-        
-        
                 Qwen cannot decide:
-        
-        
         
                 recipient
         
                 subject
         
                 body
-        
-        
         
                 Only GmailComposeManager can.
         
@@ -1201,6 +1257,43 @@ Call the appropriate tool now.
                         message: result.message,
                         data: result.data,
                     });
+                    /*
+          
+                     ====================================
+          
+                     HUMAN-READABLE WEBSITE SUMMARY
+          
+                     ====================================
+          
+                     Preserve raw-text requests and
+          
+                     allow multi-site workflows to
+          
+                     continue through the agent loop.
+          
+                     */
+                    if (toolName === "browser_read_page") {
+                        const page = result.data;
+                        const wantsRawText = /\b(raw text|exact text|full text|verbatim|extract all text|copy all text|show all text)\b/i.test(userInput);
+                        const wantsAnalysis = /\b(summarize|summary|explain|analyze|review|read|what is|what does|tell me about|describe)\b/i.test(userInput);
+                        const isMultiPageTask = /\b(compare|multiple websites|several websites|all websites|research [0-9]+|visit [0-9]+|each website|both websites)\b/i.test(userInput);
+                        if (wantsAnalysis &&
+                            !wantsRawText &&
+                            !isMultiPageTask &&
+                            typeof page?.title === "string" &&
+                            typeof page.url === "string" &&
+                            typeof page.text === "string" &&
+                            page.text.trim().length > 0) {
+                            try {
+                                const summary = await summarizeBrowserPage({ title: page.title, url: page.url, text: page.text }, userInput);
+                                return this.generatedFinalAnswer(summary);
+                            }
+                            catch (error) {
+                                console.error("Website summary failed:", error);
+                                // Existing agent flow provides a fallback answer.
+                            }
+                        }
+                    }
                     /*
           
                     ====================================

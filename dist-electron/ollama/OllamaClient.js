@@ -1,54 +1,46 @@
 import ollama from "ollama";
-const CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL ||
-    "qwen3:1.7b";
-const AGENT_MODEL = process.env.OLLAMA_AGENT_MODEL ||
+/**
+ * Lightweight customized model for conversations.
+ * Larger model for complex tool-based tasks.
+ */
+const CHAT_MODEL = process.env.OLLAMA_CHAT_MODEL?.trim() ||
+    "my-assistant";
+const AGENT_MODEL = process.env.OLLAMA_AGENT_MODEL?.trim() ||
     "qwen3:8b";
 export async function askOllama(messages, tools, mode = "agent") {
     const isChat = mode === "chat";
     const model = isChat
         ? CHAT_MODEL
         : AGENT_MODEL;
-    return await ollama.chat({
-        model,
-        messages,
-        /*
-        Simple conversation does not need
-        all tool definitions.
-    
-        Real tasks still get the full tools.
-        */
-        ...(isChat
-            ? {}
-            : {
-                tools,
-            }),
-        stream: false,
-        think: false,
-        /*
-        Small chat model stays loaded longer.
-    
-        8B is larger, so don't keep it loaded
-        forever when it isn't being used.
-        */
-        keep_alive: isChat
-            ? "30m"
-            : "10m",
-        options: {
-            temperature: isChat
-                ? 0.2
-                : 0.1,
-            /*
-            Simple chat needs much less context.
-            */
-            num_ctx: isChat
-                ? 2048
-                : 4096,
-            /*
-            Shorter generation for normal chat.
-            */
-            num_predict: isChat
-                ? 128
-                : 256,
-        },
-    });
+    const started = performance.now();
+    console.log(`[Ollama] Starting ${mode} using ${model}`);
+    try {
+        const response = await ollama.chat({
+            model,
+            messages,
+            ...(isChat ? {} : { tools }),
+            stream: false,
+            think: false,
+            keep_alive: isChat ? "30m" : "10m",
+            options: {
+                temperature: isChat ? 0.5 : 0.1,
+                top_p: 0.9,
+                repeat_penalty: isChat ? 1.15 : 1.1,
+                repeat_last_n: 128,
+                num_ctx: 4096,
+                num_predict: isChat ? 1536 : 512,
+            },
+        });
+        const seconds = ((performance.now() - started) / 1000).toFixed(2);
+        console.log(`[Ollama] ${model} completed in ${seconds}s`);
+        console.log(`[Ollama] Finish reason: ${response.done_reason ?? "unknown"}`);
+        if (response.done_reason === "length") {
+            console.warn("[Ollama] Response reached the token limit.");
+        }
+        return response;
+    }
+    catch (error) {
+        console.error(`[Ollama] Error using ${model}:`, error);
+        throw error;
+    }
 }

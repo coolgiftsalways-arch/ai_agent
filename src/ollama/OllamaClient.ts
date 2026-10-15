@@ -1,92 +1,91 @@
+
 import ollama, {
   type Message,
   type Tool,
 } from "ollama";
 
+export type OllamaMode = "chat" | "agent";
 
-export type OllamaMode =
-  | "chat"
-  | "agent";
-
-
+/**
+ * Lightweight customized model for conversations.
+ * Larger model for complex tool-based tasks.
+ */
 const CHAT_MODEL =
-  process.env.OLLAMA_CHAT_MODEL ||
-  "qwen3:1.7b";
-
+  process.env.OLLAMA_CHAT_MODEL?.trim() ||
+  "my-assistant";
 
 const AGENT_MODEL =
-  process.env.OLLAMA_AGENT_MODEL ||
+  process.env.OLLAMA_AGENT_MODEL?.trim() ||
   "qwen3:8b";
-
 
 export async function askOllama(
   messages: Message[],
   tools: Tool[],
   mode: OllamaMode = "agent"
 ) {
-  const isChat =
-    mode === "chat";
+  const isChat = mode === "chat";
 
+  const model = isChat
+    ? CHAT_MODEL
+    : AGENT_MODEL;
 
-  const model =
-    isChat
-      ? CHAT_MODEL
-      : AGENT_MODEL;
+  const started = performance.now();
 
+  console.log(
+    `[Ollama] Starting ${mode} using ${model}`
+  );
 
-  return await ollama.chat({
-    model,
+  try {
+    const response = await ollama.chat({
+      model,
+      messages,
 
-    messages,
+      ...(isChat ? {} : { tools }),
 
-    /*
-    Simple conversation does not need
-    all tool definitions.
+      stream: false,
+      think: false,
 
-    Real tasks still get the full tools.
-    */
-    ...(isChat
-      ? {}
-      : {
-          tools,
-        }),
+      keep_alive: isChat ? "30m" : "10m",
 
-    stream: false,
+      options: {
+        temperature: isChat ? 0.5 : 0.1,
+        top_p: 0.9,
 
-    think: false,
+        repeat_penalty: isChat ? 1.15 : 1.1,
+        repeat_last_n: 128,
 
-    /*
-    Small chat model stays loaded longer.
+        num_ctx: 4096,
+        num_predict: isChat ? 1536 : 512,
+      },
+    });
 
-    8B is larger, so don't keep it loaded
-    forever when it isn't being used.
-    */
-    keep_alive:
-      isChat
-        ? "30m"
-        : "10m",
+    const seconds = (
+      (performance.now() - started) / 1000
+    ).toFixed(2);
 
-    options: {
-      temperature:
-        isChat
-          ? 0.2
-          : 0.1,
+    console.log(
+      `[Ollama] ${model} completed in ${seconds}s`
+    );
 
-      /*
-      Simple chat needs much less context.
-      */
-      num_ctx:
-        isChat
-          ? 2048
-          : 4096,
+    console.log(
+      `[Ollama] Finish reason: ${
+        response.done_reason ?? "unknown"
+      }`
+    );
 
-      /*
-      Shorter generation for normal chat.
-      */
-      num_predict:
-        isChat
-          ? 128
-          : 256,
-    },
-  });
+    if (response.done_reason === "length") {
+      console.warn(
+        "[Ollama] Response reached the token limit."
+      );
+    }
+
+    return response;
+  } catch (error) {
+    console.error(
+      `[Ollama] Error using ${model}:`,
+      error
+    );
+
+    throw error;
+  }
 }
