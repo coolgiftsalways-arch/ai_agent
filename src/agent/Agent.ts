@@ -1,90 +1,76 @@
-import type {
-  Message,
-} from "ollama";
+import type { Message } from "ollama";
 
-import {
-  askOllama,
-} from "../ollama/OllamaClient.js";
-
-import {
-  FileTool,
-} from "../tools/FileTool.js";
-
-import {
-  TerminalTool,
-} from "../tools/TerminalTool.js";
-
+import { askOllama } from "../ollama/OllamaClient.js";
+import { FileTool } from "../tools/FileTool.js";
+import { TerminalTool } from "../tools/TerminalTool.js";
 import {
   agentTools,
   mapNativeToolCall,
 } from "../tools/NativeToolDefinitions.js";
+import { buildSystemPrompt } from "../prompts/systemPrompt.js";
+import { PermissionManager } from "../security/PermissionManager.js";
+import { askForApproval } from "../security/ConsoleApproval.js";
+import { validateNativeToolCall } from "../security/NativeToolValidator.js";
+import { MemoryTool } from "../tools/MemoryTool.js";
+import { MemoryManager } from "../memory/MemoryManager.js";
+import { GmailTool } from "../tools/GmailTool.js";
+
+import { Executor } from "./Executor.js";
 
 import {
-  buildSystemPrompt,
-} from "../prompts/systemPrompt.js";
+  detectToolRequirement,
+  type ToolRequirement,
+} from "./ToolRequirementDetector.js";
 
 import {
-  PermissionManager,
-} from "../security/PermissionManager.js";
-
+  GmailComposeManager,
+  type GmailDraft,
+} from "./GmailComposeManager.js";
 import {
-  askForApproval,
-} from "../security/ConsoleApproval.js";
-
-import {
-  validateNativeToolCall,
-} from "../security/NativeToolValidator.js";
-
-import {
-  MemoryTool,
-} from "../tools/MemoryTool.js";
-
-import {
-  MemoryManager,
-} from "../memory/MemoryManager.js";
-
-import {
-  Executor,
-} from "./Executor.js";
+  getCapabilityResponse,
+} from "./CapabilityResponder.js";
 
 
-type ToolRequirement = {
-  toolNames: string[];
-  description: string;
+type ApprovalFunction = (
+  message: string
+) => Promise<boolean>;
+
+
+type ToolExecutionResult = {
+  success: boolean;
+  message?: unknown;
+  data?: unknown;
 };
 
 
 export class Agent {
   private executor: Executor;
 
-  /*
-  ==========================================
-  SHORT-TERM CONVERSATION MEMORY
-  ==========================================
-  */
-
   private messages: Message[];
 
-  /*
-  ==========================================
-  LONG-TERM SQLITE MEMORY
-  ==========================================
-  */
+  private memoryManager:
+    MemoryManager;
 
-  private memoryManager: MemoryManager;
+  private gmailComposeManager:
+    GmailComposeManager;
 
 
-  constructor() {
+  constructor(
+    approvalFunction:
+      ApprovalFunction =
+      askForApproval
+  ) {
     /*
     ==========================================
-    PERMISSION MANAGER
+    PERMISSIONS
     ==========================================
     */
 
     const permissionManager =
       new PermissionManager(
-        askForApproval
+        approvalFunction
       );
+
 
     /*
     ==========================================
@@ -97,23 +83,30 @@ export class Agent {
         permissionManager
       );
 
+
     /*
     ==========================================
-    LONG-TERM MEMORY
+    MEMORY
     ==========================================
     */
 
     this.memoryManager =
       new MemoryManager();
 
-    const memoryTool =
-      new MemoryTool(
-        this.memoryManager
-      );
 
     /*
     ==========================================
-    FILE TOOL
+    GMAIL COMPOSE STATE
+    ==========================================
+    */
+
+    this.gmailComposeManager =
+      new GmailComposeManager();
+
+
+    /*
+    ==========================================
+    TOOLS
     ==========================================
     */
 
@@ -123,11 +116,6 @@ export class Agent {
         "S:\\",
       ]);
 
-    /*
-    ==========================================
-    TERMINAL TOOL
-    ==========================================
-    */
 
     const terminalTool =
       new TerminalTool([
@@ -135,23 +123,36 @@ export class Agent {
         "S:\\",
       ]);
 
-    /*
-    ==========================================
-    REGISTER TOOLS
-    ==========================================
-    */
+
+    const memoryTool =
+      new MemoryTool(
+        this.memoryManager
+      );
+
+
+    const gmailTool =
+      new GmailTool();
+
 
     this.executor.registerTool(
       fileTool
     );
 
+
     this.executor.registerTool(
       terminalTool
     );
 
+
     this.executor.registerTool(
       memoryTool
     );
+
+
+    this.executor.registerTool(
+      gmailTool
+    );
+
 
     /*
     ==========================================
@@ -161,7 +162,8 @@ export class Agent {
 
     this.messages = [
       {
-        role: "system",
+        role:
+          "system",
 
         content:
           buildSystemPrompt(),
@@ -172,415 +174,7 @@ export class Agent {
 
   /*
   ==========================================
-  DETECT REQUIRED TOOL
-  ==========================================
-
-  This is a code-level protection.
-
-  If the user requests a real action,
-  the model is not allowed to simply say
-  that the action happened.
-  */
-
-  private getToolRequirement(
-    userInput: string
-  ): ToolRequirement | null {
-    const text =
-      userInput
-        .trim()
-        .toLowerCase();
-
-    const containsFileExtension =
-      /\.[a-z0-9]{1,10}\b/i.test(
-        text
-      );
-
-    /*
-    ==========================================
-    MEMORY FORGET
-    ==========================================
-    */
-
-    if (
-      /\bforget\b/i.test(
-        text
-      ) &&
-      /\bmemory\b/i.test(
-        text
-      )
-    ) {
-      /*
-      If user already supplied an ID,
-      memory_forget itself must succeed.
-      */
-
-      if (
-        /\bmemory\s+(?:id\s*)?\d+\b/i.test(
-          text
-        ) ||
-        /\bid\s*\d+\b/i.test(
-          text
-        )
-      ) {
-        return {
-          toolNames: [
-            "memory_forget",
-          ],
-
-          description:
-            "memory_forget",
-        };
-      }
-
-      /*
-      If no ID is known yet, search is
-      needed first. The model can then
-      continue to memory_forget.
-      */
-
-      return {
-        toolNames: [
-          "memory_search",
-          "memory_forget",
-        ],
-
-        description:
-          "memory search followed by memory forget",
-      };
-    }
-
-    /*
-    ==========================================
-    MEMORY REMEMBER
-    ==========================================
-    */
-
-    if (
-      /\bremember\b/i.test(
-        text
-      )
-    ) {
-      return {
-        toolNames: [
-          "memory_remember",
-        ],
-
-        description:
-          "memory_remember",
-      };
-    }
-
-    /*
-    ==========================================
-    MEMORY SEARCH
-    ==========================================
-    */
-
-    if (
-      (
-        /\bsearch\b/i.test(
-          text
-        ) &&
-        /\bmemory\b/i.test(
-          text
-        )
-      ) ||
-      /\bmemory id\b/i.test(
-        text
-      )
-    ) {
-      return {
-        toolNames: [
-          "memory_search",
-        ],
-
-        description:
-          "memory_search",
-      };
-    }
-
-    /*
-    ==========================================
-    RENAME
-    ==========================================
-    */
-
-    if (
-      /\brename\b/i.test(
-        text
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_rename",
-          "file_move",
-        ],
-
-        description:
-          "file rename",
-      };
-    }
-
-    /*
-    ==========================================
-    MOVE
-    ==========================================
-    */
-
-    if (
-      /\bmove\b/i.test(
-        text
-      ) &&
-      (
-        text.includes("\\") ||
-        /\b(file|folder|directory)\b/i.test(
-          text
-        )
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_move",
-          "file_rename",
-        ],
-
-        description:
-          "file move",
-      };
-    }
-
-    /*
-    ==========================================
-    DELETE
-    ==========================================
-    */
-
-    if (
-      /\b(delete|remove)\b/i.test(
-        text
-      ) &&
-      (
-        text.includes("\\") ||
-        /\b(file|folder|directory)\b/i.test(
-          text
-        )
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_delete_file",
-          "file_delete_folder",
-        ],
-
-        description:
-          "file or folder deletion",
-      };
-    }
-
-    /*
-    ==========================================
-    WRITE FILE
-    ==========================================
-    */
-
-    if (
-      /\bcontent(?:s)?\s+to\b/i.test(
-        text
-      ) ||
-      (
-        /\b(change|update|edit|replace|overwrite)\b/i.test(
-          text
-        ) &&
-        /\b(content|contents|file)\b/i.test(
-          text
-        )
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_write_file",
-        ],
-
-        description:
-          "file_write_file",
-      };
-    }
-
-    /*
-    ==========================================
-    CREATE FOLDER
-    ==========================================
-    */
-
-    if (
-      /\b(create|make)\b/i.test(
-        text
-      ) &&
-      /\b(folder|directory)\b/i.test(
-        text
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_create_folder",
-        ],
-
-        description:
-          "file_create_folder",
-      };
-    }
-
-    /*
-    ==========================================
-    CREATE FILE
-    ==========================================
-    */
-
-    if (
-      /\b(create|make)\b/i.test(
-        text
-      ) &&
-      (
-        /\bfile\b/i.test(
-          text
-        ) ||
-        containsFileExtension
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_create_file",
-        ],
-
-        description:
-          "file_create_file",
-      };
-    }
-
-    /*
-    ==========================================
-    CHECK EXISTS
-    ==========================================
-    */
-
-    if (
-      /\b(exists|exist|present)\b/i.test(
-        text
-      ) &&
-      (
-        text.includes("\\") ||
-        /\b(file|folder|directory|path)\b/i.test(
-          text
-        )
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_exists",
-        ],
-
-        description:
-          "file_exists",
-      };
-    }
-
-    /*
-    ==========================================
-    READ FILE
-    ==========================================
-    */
-
-    if (
-      (
-        /\bread\b/i.test(
-          text
-        ) ||
-        /\bexact content\b/i.test(
-          text
-        ) ||
-        /\bfile content\b/i.test(
-          text
-        )
-      ) &&
-      (
-        containsFileExtension ||
-        text.includes("\\")
-      )
-    ) {
-      return {
-        toolNames: [
-          "file_read_file",
-        ],
-
-        description:
-          "file_read_file",
-      };
-    }
-
-    /*
-    ==========================================
-    LIST DIRECTORY
-    ==========================================
-    */
-
-    if (
-      (
-        /\blist\b/i.test(
-          text
-        ) ||
-        /\bcontents?\b/i.test(
-          text
-        ) ||
-        /\bwhat(?:'s| is)? inside\b/i.test(
-          text
-        ) ||
-        /\btell me[\s\S]*inside\b/i.test(
-          text
-        )
-      ) &&
-      !containsFileExtension
-    ) {
-      return {
-        toolNames: [
-          "file_list_files",
-        ],
-
-        description:
-          "file_list_files",
-      };
-    }
-
-    /*
-    ==========================================
-    TERMINAL
-    ==========================================
-    */
-
-    if (
-      /\b(run|execute)\b/i.test(
-        text
-      ) &&
-      /\b(npm|npx|node|git|pnpm|yarn|powershell|cmd|tsc)\b/i.test(
-        text
-      )
-    ) {
-      return {
-        toolNames: [
-          "terminal_run",
-        ],
-
-        description:
-          "terminal_run",
-      };
-    }
-
-    return null;
-  }
-
-
-  /*
-  ==========================================
-  EXTRACT EXACT FILE CONTENT
+  EXACT FILE CONTENT
   ==========================================
   */
 
@@ -594,39 +188,46 @@ export class Agent {
         )
       );
 
+
     if (
-      matches.length !== 1
+      matches.length !==
+      1
     ) {
       return null;
     }
 
+
     const match =
       matches[0];
+
 
     const start =
       (match.index ?? 0) +
       match[0].length;
 
+
     let content =
       userInput
-        .slice(start)
+        .slice(
+          start
+        )
         .trim();
+
 
     if (!content) {
       return null;
     }
 
+
     const first =
       content[0];
+
 
     const last =
       content[
         content.length - 1
       ];
 
-    /*
-    Remove matching surrounding quotes.
-    */
 
     if (
       content.length >= 2 &&
@@ -644,6 +245,7 @@ export class Agent {
         );
     }
 
+
     return content;
   }
 
@@ -655,33 +257,40 @@ export class Agent {
   */
 
   private isPermissionDenied(
-    result: {
-      success: boolean;
-      message?: unknown;
-    }
+    result:
+      ToolExecutionResult
   ): boolean {
-    if (result.success) {
+    if (
+      result.success
+    ) {
       return false;
     }
 
+
     const message =
       String(
-        result.message ?? ""
+        result.message ??
+        ""
       ).toLowerCase();
+
 
     return (
       message.includes(
         "permission denied"
       ) ||
+
       message.includes(
         "permission was denied"
       ) ||
+
       message.includes(
         "not approved"
       ) ||
+
       message.includes(
         "user denied"
       ) ||
+
       message.includes(
         "approval denied"
       )
@@ -696,28 +305,33 @@ export class Agent {
   */
 
   private isPathSecurityDenied(
-    result: {
-      success: boolean;
-      message?: unknown;
-    }
+    result:
+      ToolExecutionResult
   ): boolean {
-    if (result.success) {
+    if (
+      result.success
+    ) {
       return false;
     }
 
+
     const message =
       String(
-        result.message ?? ""
+        result.message ??
+        ""
       ).toLowerCase();
+
 
     return (
       message.includes(
         "access denied"
       ) &&
+
       (
         message.includes(
           "outside allowed"
         ) ||
+
         message.includes(
           "allowed folders"
         )
@@ -728,41 +342,32 @@ export class Agent {
 
   /*
   ==========================================
-  TERMINAL FALLBACK BLOCK
+  TERMINAL FALLBACK SECURITY
   ==========================================
-
-  Example:
-
-  User:
-  List C:\Windows
-
-  FileTool is the required authority.
-
-  Qwen may NOT switch to terminal_run
-  as a workaround.
   */
 
   private isBlockedTerminalFallback(
     toolName: string,
+
     requirement:
       ToolRequirement | null
   ): boolean {
     if (
       toolName !==
-      "terminal_run"
+        "terminal_run" ||
+      !requirement
     ) {
       return false;
     }
 
-    if (!requirement) {
-      return false;
-    }
 
     return (
       requirement.description ===
         "file_list_files" ||
+
       requirement.description ===
         "file_read_file" ||
+
       requirement.description ===
         "file_exists"
     );
@@ -771,7 +376,40 @@ export class Agent {
 
   /*
   ==========================================
-  SAVE FINAL ANSWER
+  REQUIREMENT CHECK
+  ==========================================
+  */
+
+  private requirementSatisfied(
+    requirement:
+      ToolRequirement | null,
+
+    successfulTools:
+      Set<string>
+  ): boolean {
+    if (
+      !requirement
+    ) {
+      return true;
+    }
+
+
+    return requirement
+      .toolNames
+      .some(
+        (
+          toolName
+        ) =>
+          successfulTools.has(
+            toolName
+          )
+      );
+  }
+
+
+  /*
+  ==========================================
+  SAVE NORMAL FINAL ANSWER
   ==========================================
   */
 
@@ -782,6 +420,7 @@ export class Agent {
       "assistant",
       answer
     );
+
 
     return answer;
   }
@@ -796,21 +435,644 @@ export class Agent {
   private generatedFinalAnswer(
     answer: string
   ): string {
-    const message: Message = {
-      role: "assistant",
-      content: answer,
+    const message:
+      Message = {
+      role:
+        "assistant",
+
+      content:
+        answer,
     };
+
 
     this.messages.push(
       message
     );
+
 
     this.memoryManager.remember(
       "assistant",
       answer
     );
 
+
     return answer;
+  }
+
+
+  /*
+  ==========================================
+  PRIVATE FINAL ANSWER
+
+  Used for Gmail and other data that
+  should not automatically enter
+  long-term memory.
+  ==========================================
+  */
+
+  private generatedPrivateFinalAnswer(
+    answer: string
+  ): string {
+    const message:
+      Message = {
+      role:
+        "assistant",
+
+      content:
+        answer,
+    };
+
+
+    this.messages.push(
+      message
+    );
+
+
+    return answer;
+  }
+
+
+  /*
+  ==========================================
+  ADD TOOL MESSAGE
+  ==========================================
+  */
+
+  private addToolMessage(
+    runMessages:
+      Message[],
+
+    toolName:
+      string,
+
+    payload:
+      unknown
+  ): void {
+    const toolMessage:
+      Message = {
+      role:
+        "tool",
+
+      tool_name:
+        toolName,
+
+      content:
+        JSON.stringify(
+          payload
+        ),
+    };
+
+
+    runMessages.push(
+      toolMessage
+    );
+
+
+    this.messages.push(
+      toolMessage
+    );
+  }
+
+
+  /*
+  ==========================================
+  CLEAN GMAIL TEXT
+  ==========================================
+  */
+
+  private cleanGmailText(
+    value:
+      unknown,
+
+    preserveLineBreaks =
+      false
+  ): string {
+    let text =
+      String(
+        value ??
+        ""
+      );
+
+
+    /*
+    Remove tracking-style links:
+
+    <https://very-long-link>Google
+
+    becomes:
+
+    Google
+    */
+
+    text =
+      text.replace(
+        /<https?:\/\/[^>]+>/gi,
+        ""
+      );
+
+
+    /*
+    Decode common HTML entities.
+    */
+
+    text =
+      text
+
+        .replace(
+          /&#39;/gi,
+          "'"
+        )
+
+        .replace(
+          /&#x27;/gi,
+          "'"
+        )
+
+        .replace(
+          /&apos;/gi,
+          "'"
+        )
+
+        .replace(
+          /&quot;/gi,
+          '"'
+        )
+
+        .replace(
+          /&nbsp;/gi,
+          " "
+        )
+
+        .replace(
+          /&lt;/gi,
+          "<"
+        )
+
+        .replace(
+          /&gt;/gi,
+          ">"
+        )
+
+        .replace(
+          /&amp;/gi,
+          "&"
+        );
+
+
+    /*
+    Remove invisible email characters.
+    */
+
+    text =
+      text.replace(
+        /[\u200B-\u200D\uFEFF\u00AD]/g,
+        ""
+      );
+
+
+    if (
+      preserveLineBreaks
+    ) {
+      return text
+
+        .replace(
+          /\r\n/g,
+          "\n"
+        )
+
+        .replace(
+          /\r/g,
+          "\n"
+        )
+
+        .replace(
+          /[ \t]+\n/g,
+          "\n"
+        )
+
+        .replace(
+          /\n{3,}/g,
+          "\n\n"
+        )
+
+        .trim();
+    }
+
+
+    return text
+
+      .replace(
+        /\s+/g,
+        " "
+      )
+
+      .trim();
+  }
+
+
+  /*
+  ==========================================
+  FORMAT DIRECT GMAIL RESULTS
+  ==========================================
+  */
+
+  private formatDirectGmailResult(
+    toolName:
+      string,
+
+    result:
+      ToolExecutionResult,
+
+    userInput:
+      string
+  ): string | null {
+    if (
+      !result.success ||
+
+      ![
+        "gmail_recent",
+        "gmail_search",
+        "gmail_read",
+      ].includes(
+        toolName
+      )
+    ) {
+      return null;
+    }
+
+
+    if (
+      !result.data ||
+
+      typeof result.data !==
+        "object" ||
+
+      Array.isArray(
+        result.data
+      )
+    ) {
+      return null;
+    }
+
+
+    const data =
+      result.data as Record<
+        string,
+        unknown
+      >;
+
+
+    /*
+    ========================================
+    GMAIL READ
+    ========================================
+    */
+
+    if (
+      toolName ===
+      "gmail_read"
+    ) {
+      const id =
+        String(
+          data.id ??
+          ""
+        );
+
+
+      const from =
+        this.cleanGmailText(
+          data.from
+        );
+
+
+      const to =
+        this.cleanGmailText(
+          data.to
+        );
+
+
+      const subject =
+        this.cleanGmailText(
+          data.subject ??
+          "(No subject)"
+        );
+
+
+      const date =
+        this.cleanGmailText(
+          data.date
+        );
+
+
+      const body =
+        this.cleanGmailText(
+          data.body ??
+          data.snippet ??
+          "",
+
+          true
+        );
+
+
+      const lines:
+        string[] = [
+        subject,
+      ];
+
+
+      if (from) {
+        lines.push(
+          `From: ${from}`
+        );
+      }
+
+
+      if (to) {
+        lines.push(
+          `To: ${to}`
+        );
+      }
+
+
+      if (date) {
+        lines.push(
+          `Date: ${date}`
+        );
+      }
+
+
+      if (id) {
+        lines.push(
+          `Gmail ID: ${id}`
+        );
+      }
+
+
+      if (body) {
+        lines.push(
+          "",
+          body
+        );
+      }
+
+
+      return lines.join(
+        "\n"
+      );
+    }
+
+
+    /*
+    ========================================
+    GMAIL RECENT / SEARCH
+    ========================================
+    */
+
+    const rawEmails =
+      data.emails;
+
+
+    if (
+      !Array.isArray(
+        rawEmails
+      )
+    ) {
+      return null;
+    }
+
+
+    if (
+      rawEmails.length ===
+      0
+    ) {
+      return toolName ===
+        "gmail_search"
+
+        ? "No matching emails were found."
+
+        : "No recent emails were found.";
+    }
+
+
+    const wantsIds =
+      /\b(?:gmail\s+)?(?:message\s+)?ids?\b/i
+        .test(
+          userInput
+        );
+
+
+    const emails =
+      rawEmails.map(
+        (
+          email,
+          index
+        ) => {
+          if (
+            !email ||
+
+            typeof email !==
+              "object" ||
+
+            Array.isArray(
+              email
+            )
+          ) {
+            return `${
+              index + 1
+            }. Email`;
+          }
+
+
+          const item =
+            email as Record<
+              string,
+              unknown
+            >;
+
+
+          const subject =
+            this.cleanGmailText(
+              item.subject ??
+              "(No subject)"
+            );
+
+
+          const from =
+            this.cleanGmailText(
+              item.from
+            );
+
+
+          const date =
+            this.cleanGmailText(
+              item.date
+            );
+
+
+          const snippet =
+            this.cleanGmailText(
+              item.snippet
+            );
+
+
+          const id =
+            String(
+              item.id ??
+              ""
+            );
+
+
+          const lines:
+            string[] = [
+            `${
+              index + 1
+            }. ${subject}`,
+          ];
+
+
+          if (from) {
+            lines.push(
+              `From: ${from}`
+            );
+          }
+
+
+          if (date) {
+            lines.push(
+              `Date: ${date}`
+            );
+          }
+
+
+          if (
+            wantsIds &&
+            id
+          ) {
+            lines.push(
+              `Gmail ID: ${id}`
+            );
+          }
+
+
+          if (snippet) {
+            lines.push(
+              `Snippet: ${snippet}`
+            );
+          }
+
+
+          return lines.join(
+            "\n"
+          );
+        }
+      );
+
+
+    const heading =
+      toolName ===
+        "gmail_recent"
+
+        ? `Here are your latest ${rawEmails.length} emails:`
+
+        : `Found ${rawEmails.length} matching emails:`;
+
+
+    return (
+      `${heading}\n\n` +
+
+      emails.join(
+        "\n\n"
+      )
+    );
+  }
+
+
+  /*
+  ==========================================
+  GMAIL SEND SUCCESS
+  ==========================================
+  */
+
+  private buildGmailSendSuccess(
+    result:
+      ToolExecutionResult,
+
+    args:
+      Record<
+        string,
+        unknown
+      >
+  ): string {
+    const data =
+      result.data &&
+
+      typeof result.data ===
+        "object" &&
+
+      !Array.isArray(
+        result.data
+      )
+
+        ? result.data as Record<
+            string,
+            unknown
+          >
+
+        : {};
+
+
+    const to =
+      String(
+        data.to ??
+        args.to ??
+        ""
+      );
+
+
+    const subject =
+      String(
+        data.subject ??
+        args.subject ??
+        ""
+      );
+
+
+    const id =
+      String(
+        data.id ??
+        ""
+      );
+
+
+    const lines = [
+      "✅ Email sent successfully.",
+    ];
+
+
+    if (to) {
+      lines.push(
+        `To: ${to}`
+      );
+    }
+
+
+    if (subject) {
+      lines.push(
+        `Subject: ${subject}`
+      );
+    }
+
+
+    if (id) {
+      lines.push(
+        `Gmail ID: ${id}`
+      );
+    }
+
+
+    return lines.join(
+      "\n"
+    );
   }
 
 
@@ -821,8 +1083,169 @@ export class Agent {
   */
 
   async run(
-    userInput: string
-  ): Promise<string> {
+  userInput: string
+): Promise<string> {
+  /*
+  ==========================================
+  CURRENT USER MESSAGE
+  ==========================================
+  */
+
+  const userMessage:
+    Message = {
+    role:
+      "user",
+
+    content:
+      userInput,
+  };
+
+
+  this.messages.push(
+    userMessage
+  );
+
+
+  /*
+  ==========================================
+  KNOWN CAPABILITY RESPONSES
+  ==========================================
+
+  Do not ask the language model to guess
+  what the local agent can actually do.
+  ==========================================
+  */
+
+  const capabilityResponse =
+    getCapabilityResponse(
+      userInput
+    );
+
+
+  if (
+    capabilityResponse
+  ) {
+    return this
+      .generatedPrivateFinalAnswer(
+        capabilityResponse
+      );
+  }
+
+
+  /*
+  ==========================================
+  DETECT REQUIRED TOOL
+  ==========================================
+  */
+
+  const detectedToolRequirement =
+    detectToolRequirement(
+      userInput
+    );
+
+
+  /*
+  ==========================================
+  GMAIL COMPOSE MANAGER
+  ==========================================
+  */
+
+  const gmailCompose =
+    this.gmailComposeManager
+      .process(
+        userInput,
+
+        detectedToolRequirement
+          ?.description ===
+          "gmail_send"
+      );
+
+
+    /*
+    ==========================================
+    CURRENT USER MESSAGE
+    ==========================================
+    */
+
+
+
+    this.messages.push(
+      userMessage
+    );
+
+
+    /*
+    Gmail compose follow-up question.
+
+    Example:
+
+    Send an email
+    ↓
+    What email address should I send it to?
+    */
+
+    if (
+      gmailCompose.kind ===
+      "reply"
+    ) {
+      return this
+        .generatedPrivateFinalAnswer(
+          gmailCompose.message
+        );
+    }
+
+
+    /*
+    ==========================================
+    COMPLETE GMAIL DRAFT
+    ==========================================
+    */
+
+    const resolvedGmailDraft:
+      GmailDraft | null =
+
+      gmailCompose.kind ===
+        "ready"
+
+        ? gmailCompose.draft
+
+        : null;
+
+
+    /*
+    A finished Gmail draft becomes
+    a required gmail_send action.
+    */
+
+    const toolRequirement:
+      ToolRequirement | null =
+
+      resolvedGmailDraft
+
+        ? {
+            toolNames: [
+              "gmail_send",
+            ],
+
+            description:
+              "gmail_send",
+          }
+
+        : detectedToolRequirement;
+
+
+    /*
+    ==========================================
+    EXACT FILE CONTENT
+    ==========================================
+    */
+
+    const exactRequestedContent =
+      this.extractExactFileContent(
+        userInput
+      );
+
+
     /*
     ==========================================
     LONG-TERM MEMORY
@@ -835,13 +1258,31 @@ export class Agent {
           userInput
         );
 
-    const runMessages: Message[] = [
-      ...this.messages,
+
+    /*
+    The current user message was already
+    added to this.messages.
+
+    Remove it temporarily so memory context
+    can be inserted BEFORE the current user
+    message.
+    */
+
+    const runMessages:
+      Message[] = [
+      ...this.messages.slice(
+        0,
+        -1
+      ),
     ];
 
-    if (longTermMemory) {
+
+    if (
+      longTermMemory
+    ) {
       runMessages.push({
-        role: "system",
+        role:
+          "system",
 
         content: `
 RELEVANT LONG-TERM MEMORY:
@@ -849,67 +1290,73 @@ RELEVANT LONG-TERM MEMORY:
 ${longTermMemory}
 
 Use this memory only when relevant.
-
-The newest user instruction always has
-priority over older memory.
-
+The newest user instruction has priority over older memory.
 Memory can be outdated.
-
 For current computer state, use real tools.
 `,
       });
     }
 
-    /*
-    ==========================================
-    SAVE USER MESSAGE
-    ==========================================
-    */
-
-    this.memoryManager.remember(
-      "user",
-      userInput
-    );
-
-    const userMessage: Message = {
-      role: "user",
-      content: userInput,
-    };
-
-    this.messages.push(
-      userMessage
-    );
 
     runMessages.push(
       userMessage
     );
 
+
     /*
     ==========================================
-    TASK REQUIREMENTS
+    SAVE USER MEMORY
+    ==========================================
+
+    Gmail compose/send contents are NOT
+    automatically written to SQLite memory.
     ==========================================
     */
 
-    const toolRequirement =
-      this.getToolRequirement(
-        userInput
-      );
+    if (
+      toolRequirement
+        ?.description !==
+        "gmail_send" &&
 
-    const exactRequestedContent =
-      this.extractExactFileContent(
-        userInput
-      );
+      gmailCompose.kind ===
+        "none"
+    ) {
+      this.memoryManager
+        .remember(
+          "user",
+          userInput
+        );
+    }
+
+
+    /*
+    ==========================================
+    AGENT LOOP STATE
+    ==========================================
+    */
 
     const successfulTools =
       new Set<string>();
 
-    const MAX_STEPS = 30;
+
+    const successfulToolCalls =
+      new Map<
+        string,
+        ToolExecutionResult
+      >();
+
+
+    const MAX_STEPS =
+      30;
+
 
     let unresolvedToolFailure =
       false;
 
+
     let failureReminderCount =
       0;
+
 
     let toolRequirementReminderCount =
       0;
@@ -923,35 +1370,57 @@ For current computer state, use real tools.
 
     for (
       let step = 1;
-      step <= MAX_STEPS;
+
+      step <=
+        MAX_STEPS;
+
       step++
     ) {
       console.log(
         `\n🧠 Agent step ${step}/${MAX_STEPS}`
       );
 
+
       console.log(
         "Thinking..."
       );
 
+
       /*
       ========================================
-      ASK OLLAMA / QWEN
+      ASK OLLAMA
+
+      Normal chat:
+      qwen3:1.7b
+
+      Real tool task:
+      qwen3:8b
       ========================================
       */
 
       const response =
         await askOllama(
           runMessages,
-          agentTools
+
+          toolRequirement
+            ? agentTools
+            : [],
+
+          toolRequirement
+            ? "agent"
+            : "chat"
         );
+
 
       const assistantMessage =
         response.message;
 
+
       const toolCalls =
-        assistantMessage.tool_calls ??
+        assistantMessage
+          .tool_calls ??
         [];
+
 
       runMessages.push(
         assistantMessage
@@ -965,7 +1434,8 @@ For current computer state, use real tools.
       */
 
       if (
-        toolCalls.length === 0
+        toolCalls.length ===
+        0
       ) {
         /*
         Previous required tool failed.
@@ -975,10 +1445,12 @@ For current computer state, use real tools.
           unresolvedToolFailure
         ) {
           if (
-            failureReminderCount < 2
+            failureReminderCount <
+            2
           ) {
             runMessages.push({
-              role: "system",
+              role:
+                "system",
 
               content: `
 A required tool action failed.
@@ -997,14 +1469,18 @@ clearly report failure.
 `,
             });
 
+
             failureReminderCount++;
+
 
             continue;
           }
 
-          return this.generatedFinalAnswer(
-            "The requested action could not be completed because the required tool failed."
-          );
+
+          return this
+            .generatedFinalAnswer(
+              "The requested action could not be completed because the required tool failed."
+            );
         }
 
 
@@ -1014,35 +1490,27 @@ clearly report failure.
         ======================================
         */
 
-        if (toolRequirement) {
-          const requirementSatisfied =
-            toolRequirement
-              .toolNames
-              .some(
-                (toolName) =>
-                  successfulTools.has(
-                    toolName
-                  )
-              );
-
+        if (
+          !this.requirementSatisfied(
+            toolRequirement,
+            successfulTools
+          )
+        ) {
           if (
-            !requirementSatisfied
+            toolRequirementReminderCount <
+            2
           ) {
-            if (
-              toolRequirementReminderCount <
-              2
-            ) {
-              runMessages.push({
-                role: "system",
+            runMessages.push({
+              role:
+                "system",
 
-                content: `
+              content: `
 REQUIRED TOOL GUARD
 
 The user's request requires a real tool action.
 
 Required tool/action:
-
-${toolRequirement.description}
+${toolRequirement?.description ?? "unknown"}
 
 The required tool has NOT successfully executed yet.
 
@@ -1050,17 +1518,20 @@ Do not claim success.
 
 Call the appropriate tool now.
 `,
-              });
+            });
 
-              toolRequirementReminderCount++;
 
-              continue;
-            }
+            toolRequirementReminderCount++;
 
-            return this.generatedFinalAnswer(
+
+            continue;
+          }
+
+
+          return this
+            .generatedFinalAnswer(
               "I could not safely complete the request because the required tool was not executed."
             );
-          }
         }
 
 
@@ -1075,42 +1546,51 @@ Call the appropriate tool now.
             .content
             ?.trim();
 
+
         if (answer) {
           this.messages.push(
             assistantMessage
           );
 
-          return this.saveFinalAnswer(
-            answer
-          );
+
+          return this
+            .saveFinalAnswer(
+              answer
+            );
         }
+
 
         if (
-          successfulTools.size > 0
+          successfulTools.size >
+          0
         ) {
-          return this.generatedFinalAnswer(
-            "Task completed successfully."
-          );
+          return this
+            .generatedFinalAnswer(
+              "Task completed successfully."
+            );
         }
 
-        return this.generatedFinalAnswer(
-          "No action was completed."
-        );
+
+        return this
+          .generatedFinalAnswer(
+            "No action was completed."
+          );
       }
 
 
       /*
-      ========================================
-      STORE TOOL-CALL ASSISTANT MESSAGE
-      ========================================
+      Tool-call assistant message
+      becomes part of conversation.
       */
 
       this.messages.push(
         assistantMessage
       );
 
+
       let currentBatchFailed =
         false;
+
 
       let currentBatchSucceeded =
         false;
@@ -1129,28 +1609,31 @@ Call the appropriate tool now.
         const toolName =
           toolCall.function.name;
 
-        const rawArgs: unknown =
-  toolCall.function.arguments;
+
+        const rawArgs:
+          unknown =
+          toolCall.function
+            .arguments;
 
 
         /*
         ======================================
         BUILD CANDIDATE ARGUMENTS
         ======================================
-
-        We clone object arguments before
-        validation so exact-content protection
-        can be applied safely.
         */
 
         let candidateArgs:
           unknown =
           rawArgs;
 
+
         if (
-          rawArgs !== null &&
+          rawArgs !==
+            null &&
+
           typeof rawArgs ===
             "object" &&
+
           !Array.isArray(
             rawArgs
           )
@@ -1160,36 +1643,29 @@ Call the appropriate tool now.
               string,
               unknown
             > = {
-              ...(
-                rawArgs as Record<
-                  string,
-                  unknown
-                >
-              ),
-            };
+            ...(
+              rawArgs as Record<
+                string,
+                unknown
+              >
+            ),
+          };
 
 
           /*
           ====================================
-          EXACT CONTENT PROTECTION
+          EXACT FILE CONTENT PROTECTION
           ====================================
-
-          User:
-          content to hello
-
-          Qwen:
-          hello /
-
-          Real execution:
-          hello
           */
 
           if (
             exactRequestedContent !==
               null &&
+
             (
               toolName ===
                 "file_write_file" ||
+
               toolName ===
                 "file_create_file"
             )
@@ -1198,6 +1674,7 @@ Call the appropriate tool now.
               exactRequestedContent;
           }
 
+
           candidateArgs =
             clonedArgs;
         }
@@ -1205,20 +1682,98 @@ Call the appropriate tool now.
 
         /*
         ======================================
-        VALIDATE TOOL ARGUMENTS
+        GMAIL SEND PROTECTION
         ======================================
 
-        FLOW:
+        Qwen cannot decide:
 
-        Qwen
-        ↓
-        NativeToolValidator
-        ↓
-        mapNativeToolCall
-        ↓
-        PermissionManager
-        ↓
-        real tool
+        recipient
+        subject
+        body
+
+        Only GmailComposeManager can.
+        ======================================
+        */
+
+        if (
+          toolName ===
+          "gmail_send"
+        ) {
+          if (
+            !resolvedGmailDraft
+          ) {
+            const blockedResult = {
+              success:
+                false,
+
+              message:
+                "gmail_send blocked because recipient, subject, and message were not completed by the Gmail compose flow.",
+            };
+
+
+            console.log(
+              "\n🛡️ Gmail send blocked:"
+            );
+
+
+            console.log(
+              blockedResult
+            );
+
+
+            this.addToolMessage(
+              runMessages,
+              toolName,
+              blockedResult
+            );
+
+
+            currentBatchFailed =
+              true;
+
+
+            continue;
+          }
+
+
+          candidateArgs = {
+            ...(
+              candidateArgs &&
+
+              typeof candidateArgs ===
+                "object" &&
+
+              !Array.isArray(
+                candidateArgs
+              )
+
+                ? candidateArgs as Record<
+                    string,
+                    unknown
+                  >
+
+                : {}
+            ),
+
+
+            to:
+              resolvedGmailDraft.to,
+
+
+            subject:
+              resolvedGmailDraft.subject,
+
+
+            body:
+              resolvedGmailDraft.body,
+          };
+        }
+
+
+        /*
+        ======================================
+        VALIDATE TOOL ARGUMENTS
+        ======================================
         */
 
         const validation =
@@ -1228,69 +1783,112 @@ Call the appropriate tool now.
           );
 
 
-        /*
-        ======================================
-        VALIDATION FAILED
-        ======================================
-        */
-
         if (
           !validation.success
         ) {
           const validationResult = {
-            success: false,
+            success:
+              false,
 
             message:
               validation.message,
           };
 
+
           console.log(
             `\n🛡️ Validation blocked: ${toolName}`
           );
+
 
           console.log(
             validationResult
           );
 
-          const toolMessage: Message = {
-            role: "tool",
 
-            tool_name:
-              toolName,
-
-            content:
-              JSON.stringify(
-                validationResult
-              ),
-          };
-
-          runMessages.push(
-            toolMessage
+          this.addToolMessage(
+            runMessages,
+            toolName,
+            validationResult
           );
 
-          this.messages.push(
-            toolMessage
-          );
 
           currentBatchFailed =
             true;
+
 
           continue;
         }
 
 
-        /*
-        These arguments have now passed
-        runtime validation.
-        */
-
         const args =
           validation.args;
+
+
+        /*
+        ======================================
+        DUPLICATE SUCCESS PROTECTION
+        ======================================
+        */
+
+        const toolCallKey =
+          `${toolName}:${JSON.stringify(
+            args
+          )}`;
+
+
+        const previousSuccessfulResult =
+          successfulToolCalls.get(
+            toolCallKey
+          );
+
+
+        if (
+          previousSuccessfulResult
+        ) {
+          console.log(
+            `\n♻️ Duplicate tool call blocked: ${toolName}`
+          );
+
+
+          this.addToolMessage(
+            runMessages,
+
+            toolName,
+
+            {
+              ...previousSuccessfulResult,
+
+              message:
+                "This exact tool call already succeeded. Use the previous result and answer the user now. Do not call the same tool again with the same arguments.",
+
+              executedArguments:
+                args,
+            }
+          );
+
+
+          runMessages.push({
+            role:
+              "system",
+
+            content:
+              "The exact same tool call already succeeded. Do NOT call it again. Use the successful result already provided and answer the user's request now.",
+          });
+
+
+          successfulTools.add(
+            toolName
+          );
+
+
+          continue;
+        }
 
 
         console.log(
           `\n🔧 Native tool call: ${toolName}`
         );
+
 
         console.log(
           "Arguments:",
@@ -1311,42 +1909,34 @@ Call the appropriate tool now.
           )
         ) {
           const blockedResult = {
-            success: false,
+            success:
+              false,
 
             message:
               "Terminal fallback is not allowed for this file-system request. Use the required FileTool.",
           };
 
+
           console.log(
             "\n🛡️ Security blocked:"
           );
+
 
           console.log(
             blockedResult
           );
 
-          const toolMessage: Message = {
-            role: "tool",
 
-            tool_name:
-              toolName,
-
-            content:
-              JSON.stringify(
-                blockedResult
-              ),
-          };
-
-          runMessages.push(
-            toolMessage
+          this.addToolMessage(
+            runMessages,
+            toolName,
+            blockedResult
           );
 
-          this.messages.push(
-            toolMessage
-          );
 
           currentBatchFailed =
             true;
+
 
           continue;
         }
@@ -1365,45 +1955,28 @@ Call the appropriate tool now.
           );
 
 
-        /*
-        ======================================
-        UNKNOWN TOOL
-        ======================================
-
-        Normally the validator already blocks
-        unknown tools, but keep defense-in-depth.
-        */
-
-        if (!request) {
+        if (
+          !request
+        ) {
           const errorResult = {
-            success: false,
+            success:
+              false,
 
             message:
               `Unknown tool: ${toolName}`,
           };
 
+
+          this.addToolMessage(
+            runMessages,
+            toolName,
+            errorResult
+          );
+
+
           currentBatchFailed =
             true;
 
-          const toolMessage: Message = {
-            role: "tool",
-
-            tool_name:
-              toolName,
-
-            content:
-              JSON.stringify(
-                errorResult
-              ),
-          };
-
-          runMessages.push(
-            toolMessage
-          );
-
-          this.messages.push(
-            toolMessage
-          );
 
           continue;
         }
@@ -1416,13 +1989,16 @@ Call the appropriate tool now.
         */
 
         const result =
-          await this.executor.execute(
-            request
-          );
+          await this.executor
+            .execute(
+              request
+            );
+
 
         console.log(
           "\n🔧 Tool result:"
         );
+
 
         console.log(
           result
@@ -1430,36 +2006,21 @@ Call the appropriate tool now.
 
 
         /*
-        ======================================
-        SEND RESULT BACK TO QWEN
-        ======================================
+        Send tool result back to
+        Qwen/context.
         */
 
-        const resultForModel = {
-          ...result,
+        this.addToolMessage(
+          runMessages,
 
-          executedArguments:
-            args,
-        };
+          toolName,
 
-        const toolMessage: Message = {
-          role: "tool",
+          {
+            ...result,
 
-          tool_name:
-            toolName,
-
-          content:
-            JSON.stringify(
-              resultForModel
-            ),
-        };
-
-        runMessages.push(
-          toolMessage
-        );
-
-        this.messages.push(
-          toolMessage
+            executedArguments:
+              args,
+          }
         );
 
 
@@ -1467,8 +2028,6 @@ Call the appropriate tool now.
         ======================================
         PERMISSION DENIED
         ======================================
-
-        Do not retry automatically.
         */
 
         if (
@@ -1476,9 +2035,19 @@ Call the appropriate tool now.
             result
           )
         ) {
-          return this.generatedFinalAnswer(
-            "Permission denied. The action was not performed."
-          );
+          if (
+            toolName ===
+            "gmail_send"
+          ) {
+            this.gmailComposeManager
+              .clear();
+          }
+
+
+          return this
+            .generatedFinalAnswer(
+              "Permission denied. The action was not performed."
+            );
         }
 
 
@@ -1493,11 +2062,12 @@ Call the appropriate tool now.
             result
           )
         ) {
-          return this.generatedFinalAnswer(
-            String(
-              result.message
-            )
-          );
+          return this
+            .generatedFinalAnswer(
+              String(
+                result.message
+              )
+            );
         }
 
 
@@ -1507,22 +2077,106 @@ Call the appropriate tool now.
         ======================================
         */
 
-        if (result.success) {
+        if (
+          result.success
+        ) {
           currentBatchSucceeded =
             true;
+
 
           successfulTools.add(
             toolName
           );
 
+
+          successfulToolCalls.set(
+            toolCallKey,
+
+            {
+              success:
+                result.success,
+
+              message:
+                result.message,
+
+              data:
+                result.data,
+            }
+          );
+
+
+          /*
+          ====================================
+          FAST GMAIL SEND
+          ====================================
+          */
+
+          if (
+            toolName ===
+            "gmail_send"
+          ) {
+            this.gmailComposeManager
+              .clear();
+
+
+            return this
+              .generatedPrivateFinalAnswer(
+                this.buildGmailSendSuccess(
+                  result,
+                  args
+                )
+              );
+          }
+
+
+          /*
+          ====================================
+          FAST GMAIL READ / SEARCH / RECENT
+          ====================================
+          */
+
+          if (
+            toolName ===
+              "gmail_recent" ||
+
+            toolName ===
+              "gmail_search" ||
+
+            toolName ===
+              "gmail_read"
+          ) {
+            const gmailAnswer =
+              this.formatDirectGmailResult(
+                toolName,
+                result,
+                userInput
+              );
+
+
+            if (
+              gmailAnswer
+            ) {
+              return this
+                .generatedPrivateFinalAnswer(
+                  gmailAnswer
+                );
+            }
+          }
+
+
           /*
           Do not duplicate explicit
-          memory-tool records.
+          memory records or Gmail data
+          into general tool memory.
           */
 
           if (
             !toolName.startsWith(
               "memory_"
+            ) &&
+
+            !toolName.startsWith(
+              "gmail_"
             )
           ) {
             this.memoryManager
@@ -1531,13 +2185,9 @@ Call the appropriate tool now.
                 result
               );
           }
-        } else {
-          /*
-          ====================================
-          FAILURE
-          ====================================
-          */
+        }
 
+        else {
           currentBatchFailed =
             true;
         }
@@ -1551,15 +2201,10 @@ Call the appropriate tool now.
       */
 
       const requirementSatisfied =
-        !toolRequirement ||
-        toolRequirement
-          .toolNames
-          .some(
-            (toolName) =>
-              successfulTools.has(
-                toolName
-              )
-          );
+        this.requirementSatisfied(
+          toolRequirement,
+          successfulTools
+        );
 
 
       if (
@@ -1568,11 +2213,14 @@ Call the appropriate tool now.
       ) {
         unresolvedToolFailure =
           true;
-      } else if (
+      }
+
+      else if (
         currentBatchSucceeded
       ) {
         unresolvedToolFailure =
           false;
+
 
         failureReminderCount =
           0;
@@ -1580,27 +2228,50 @@ Call the appropriate tool now.
     }
 
 
-    return this.generatedFinalAnswer(
-      "The agent stopped because the maximum number of steps was reached."
-    );
+    /*
+    ==========================================
+    MAX STEPS
+    ==========================================
+    */
+
+    return this
+      .generatedFinalAnswer(
+        "The agent stopped because the maximum number of steps was reached."
+      );
   }
 
 
   /*
   ==========================================
-  CLEAR SHORT-TERM MEMORY ONLY
+  RESET CONVERSATION
   ==========================================
   */
 
-  resetConversation(): void {
+  resetConversation():
+    void {
+    /*
+    Cancel any unfinished Gmail draft.
+    */
+
+    this.gmailComposeManager
+      .clear();
+
+
+    /*
+    Reset only short-term conversation.
+    SQLite memory remains.
+    */
+
     this.messages = [
       {
-        role: "system",
+        role:
+          "system",
 
         content:
           buildSystemPrompt(),
       },
     ];
+
 
     console.log(
       "🧠 Short-term conversation memory cleared."

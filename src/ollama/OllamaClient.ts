@@ -3,27 +3,90 @@ import ollama, {
   type Tool,
 } from "ollama";
 
-const MODEL =
-  process.env.OLLAMA_MODEL ||
+
+export type OllamaMode =
+  | "chat"
+  | "agent";
+
+
+const CHAT_MODEL =
+  process.env.OLLAMA_CHAT_MODEL ||
   "qwen3:1.7b";
+
+
+const AGENT_MODEL =
+  process.env.OLLAMA_AGENT_MODEL ||
+  "qwen3:8b";
+
 
 export async function askOllama(
   messages: Message[],
-  tools: Tool[]
+  tools: Tool[],
+  mode: OllamaMode = "agent"
 ) {
+  const isChat =
+    mode === "chat";
+
+
+  const model =
+    isChat
+      ? CHAT_MODEL
+      : AGENT_MODEL;
+
+
   return await ollama.chat({
-    model: MODEL,
+    model,
 
     messages,
 
-    tools,
+    /*
+    Simple conversation does not need
+    all tool definitions.
+
+    Real tasks still get the full tools.
+    */
+    ...(isChat
+      ? {}
+      : {
+          tools,
+        }),
 
     stream: false,
 
-    think: true,
+    think: false,
+
+    /*
+    Small chat model stays loaded longer.
+
+    8B is larger, so don't keep it loaded
+    forever when it isn't being used.
+    */
+    keep_alive:
+      isChat
+        ? "30m"
+        : "10m",
 
     options: {
-      temperature: 0.1,
+      temperature:
+        isChat
+          ? 0.2
+          : 0.1,
+
+      /*
+      Simple chat needs much less context.
+      */
+      num_ctx:
+        isChat
+          ? 2048
+          : 4096,
+
+      /*
+      Shorter generation for normal chat.
+      */
+      num_predict:
+        isChat
+          ? 128
+          : 256,
     },
   });
 }

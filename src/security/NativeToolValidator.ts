@@ -1,21 +1,12 @@
-import { z } from "zod";
-
-
-export type ValidationResult =
-  | {
-      success: true;
-      args: Record<string, unknown>;
-    }
-  | {
-      success: false;
-      message: string;
-    };
+import {
+  z,
+} from "zod";
 
 
 /*
-==================================================
-COMMON VALIDATORS
-==================================================
+==========================================
+COMMON SCHEMAS
+==========================================
 */
 
 const pathSchema =
@@ -24,10 +15,10 @@ const pathSchema =
     .trim()
     .min(
       1,
-      "Path cannot be empty."
+      "Path is required."
     )
     .max(
-      4096,
+      32768,
       "Path is too long."
     );
 
@@ -37,21 +28,7 @@ const contentSchema =
     .string()
     .max(
       2_000_000,
-      "File content is too large."
-    );
-
-
-const memoryTextSchema =
-  z
-    .string()
-    .trim()
-    .min(
-      1,
-      "Memory text cannot be empty."
-    )
-    .max(
-      20_000,
-      "Memory text is too large."
+      "Content is too large."
     );
 
 
@@ -61,7 +38,7 @@ const commandSchema =
     .trim()
     .min(
       1,
-      "Command cannot be empty."
+      "Command is required."
     )
     .max(
       20_000,
@@ -69,304 +46,521 @@ const commandSchema =
     );
 
 
-const positiveIntegerSchema =
+const limitSchema =
   z
     .number()
     .int()
-    .positive();
+    .min(1)
+    .max(100)
+    .optional();
 
 
 /*
-==================================================
-FILE SCHEMAS
-==================================================
+==========================================
+GMAIL RECIPIENT VALIDATION
+==========================================
 */
 
-const createFolderSchema =
-  z.object({
-    path: pathSchema,
-  });
+const gmailRecipientsSchema =
+  z
+    .string()
+    .trim()
+    .min(
+      1,
+      "At least one recipient is required."
+    )
+    .max(
+      7000,
+      "Recipient list is too long."
+    )
+    .refine(
+      (
+        value
+      ) =>
+        !/[\r\n]/.test(
+          value
+        ),
+
+      {
+        message:
+          "Recipients cannot contain line breaks.",
+      }
+    )
+    .refine(
+      (
+        value
+      ) => {
+        const recipients =
+          value
+            .split(
+              ","
+            )
+            .map(
+              (
+                item
+              ) =>
+                item.trim()
+            )
+            .filter(
+              Boolean
+            );
 
 
-const createFileSchema =
-  z.object({
-    path:
-      pathSchema,
-
-    content:
-      contentSchema
-        .optional()
-        .default(""),
-  });
+        if (
+          recipients.length <
+            1 ||
+          recipients.length >
+            20
+        ) {
+          return false;
+        }
 
 
-const readFileSchema =
-  z.object({
-    path: pathSchema,
-  });
+        return recipients.every(
+          (
+            email
+          ) =>
+            z
+              .string()
+              .email()
+              .safeParse(
+                email
+              )
+              .success
+        );
+      },
+
+      {
+        message:
+          "Provide 1 to 20 valid recipient email addresses separated by commas.",
+      }
+    );
 
 
-const writeFileSchema =
-  z.object({
-    path:
-      pathSchema,
+const gmailSubjectSchema =
+  z
+    .string()
+    .trim()
+    .min(
+      1,
+      "Email subject is required."
+    )
+    .max(
+      500,
+      "Email subject is too long."
+    )
+    .refine(
+      (
+        value
+      ) =>
+        !/[\r\n]/.test(
+          value
+        ),
 
-    content:
-      contentSchema,
-  });
-
-
-const listFilesSchema =
-  z.object({
-    path:
-      pathSchema
-        .optional()
-        .default("."),
-  });
-
-
-const fileExistsSchema =
-  z.object({
-    path: pathSchema,
-  });
-
-
-const renameMoveSchema =
-  z.object({
-    oldPath:
-      pathSchema,
-
-    newPath:
-      pathSchema,
-  });
+      {
+        message:
+          "Email subject cannot contain line breaks.",
+      }
+    );
 
 
-const deletePathSchema =
-  z.object({
-    path: pathSchema,
-  });
+const gmailBodySchema =
+  z
+    .string()
+    .max(
+      200_000,
+      "Email body is too large."
+    )
+    .refine(
+      (
+        value
+      ) =>
+        value
+          .trim()
+          .length >
+        0,
+
+      {
+        message:
+          "Email body cannot be empty.",
+      }
+    );
 
 
 /*
-==================================================
-TERMINAL SCHEMA
-==================================================
+==========================================
+TOOL SCHEMAS
+==========================================
 */
 
-const terminalRunSchema =
-  z.object({
-    command:
-      commandSchema,
-
-    cwd:
-      pathSchema
-        .optional(),
-  });
-
-
-/*
-==================================================
-MEMORY SCHEMAS
-==================================================
-*/
-
-const memoryRememberSchema =
-  z.object({
-    content:
-      memoryTextSchema,
-  });
-
-
-const memorySearchSchema =
-  z.object({
-    query:
-      memoryTextSchema,
-
-    limit:
-      z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .optional()
-        .default(10),
-  });
-
-
-const memoryRecentSchema =
-  z.object({
-    limit:
-      z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .optional()
-        .default(10),
-  });
-
-
-const memoryForgetSchema =
-  z.object({
-    id:
-      positiveIntegerSchema,
-  });
-
-
-/*
-==================================================
-SCHEMA LOOKUP
-==================================================
-*/
-
-const schemas: Record<
-  string,
-  z.ZodTypeAny
-> = {
+const toolSchemas = {
   /*
+  ========================================
   FILE
+  ========================================
   */
 
   file_create_folder:
-    createFolderSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
+
 
   file_create_file:
-    createFileSchema,
+    z.object({
+      path:
+        pathSchema,
+
+      content:
+        contentSchema
+          .optional(),
+    }),
+
 
   file_read_file:
-    readFileSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
+
 
   file_write_file:
-    writeFileSchema,
+    z.object({
+      path:
+        pathSchema,
+
+      content:
+        contentSchema,
+    }),
+
 
   file_list_files:
-    listFilesSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
+
 
   file_exists:
-    fileExistsSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
+
 
   file_rename:
-    renameMoveSchema,
+    z.object({
+      oldPath:
+        pathSchema,
+
+      newPath:
+        pathSchema,
+    }),
+
 
   file_move:
-    renameMoveSchema,
+    z.object({
+      oldPath:
+        pathSchema,
+
+      newPath:
+        pathSchema,
+    }),
+
 
   file_delete_file:
-    deletePathSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
+
 
   file_delete_folder:
-    deletePathSchema,
+    z.object({
+      path:
+        pathSchema,
+    }),
 
 
   /*
+  ========================================
   TERMINAL
+  ========================================
   */
 
   terminal_run:
-    terminalRunSchema,
+    z.object({
+      command:
+        commandSchema,
+
+      cwd:
+        pathSchema,
+    }),
 
 
   /*
+  ========================================
   MEMORY
+  ========================================
   */
 
   memory_remember:
-    memoryRememberSchema,
+    z.object({
+      content:
+        z
+          .string()
+          .trim()
+          .min(
+            1,
+            "Memory content is required."
+          )
+          .max(
+            100_000,
+            "Memory content is too large."
+          ),
+    }),
+
 
   memory_search:
-    memorySearchSchema,
+    z.object({
+      query:
+        z
+          .string()
+          .trim()
+          .min(
+            1,
+            "Memory search query is required."
+          )
+          .max(
+            10_000,
+            "Memory search query is too long."
+          ),
+
+      limit:
+        limitSchema,
+    }),
+
 
   memory_recent:
-    memoryRecentSchema,
+    z.object({
+      limit:
+        limitSchema,
+    }),
+
 
   memory_forget:
-    memoryForgetSchema,
+    z.object({
+      id:
+        z
+          .number()
+          .int()
+          .positive(),
+    }),
+
+
+  /*
+  ========================================
+  GMAIL
+  ========================================
+  */
+
+  gmail_recent:
+    z.object({
+      limit:
+        limitSchema,
+    }),
+
+
+  gmail_search:
+    z.object({
+      query:
+        z
+          .string()
+          .trim()
+          .min(
+            1,
+            "Gmail search query is required."
+          )
+          .max(
+            5000,
+            "Gmail search query is too long."
+          ),
+
+      limit:
+        limitSchema,
+    }),
+
+
+  gmail_read:
+    z.object({
+      id:
+        z
+          .string()
+          .trim()
+          .min(
+            1,
+            "Gmail message ID is required."
+          )
+          .max(
+            500,
+            "Gmail message ID is too long."
+          ),
+    }),
+
+
+  gmail_send:
+    z.object({
+      /*
+      One string is deliberately used.
+
+      Example:
+
+      user1@gmail.com, user2@gmail.com
+      */
+
+      to:
+        gmailRecipientsSchema,
+
+      subject:
+        gmailSubjectSchema,
+
+      body:
+        gmailBodySchema,
+    }),
 };
 
 
 /*
-==================================================
-FORMAT VALIDATION ERROR
-==================================================
+==========================================
+VALIDATION RESULT
+==========================================
+*/
+
+export type NativeToolValidationResult =
+  | {
+      success: true;
+
+      args:
+        Record<
+          string,
+          unknown
+        >;
+    }
+
+  | {
+      success: false;
+
+      message:
+        string;
+    };
+
+
+/*
+==========================================
+FORMAT ZOD ERROR
+==========================================
 */
 
 function formatValidationError(
-  error: z.ZodError
+  error:
+    z.ZodError
 ): string {
-  const messages =
-    error.issues.map(
-      (issue) => {
-        const location =
-          issue.path.length > 0
-            ? issue.path.join(".")
+  return error.issues
+    .map(
+      (
+        issue
+      ) => {
+        const path =
+          issue.path.length >
+          0
+            ? issue.path.join(
+                "."
+              )
             : "arguments";
 
+
         return (
-          `${location}: ` +
+          `${path}: ` +
           issue.message
         );
       }
+    )
+    .join(
+      "; "
     );
-
-  return messages.join("; ");
 }
 
 
 /*
-==================================================
+==========================================
 VALIDATE NATIVE TOOL CALL
-==================================================
+==========================================
 */
 
 export function validateNativeToolCall(
-  toolName: string,
-  rawArgs: unknown
-): ValidationResult {
-  /*
-  Reject tools which are not explicitly
-  known to this validator.
+  toolName:
+    string,
 
-  This is safer than letting an unexpected
-  native tool continue automatically.
-  */
-
+  rawArgs:
+    unknown
+): NativeToolValidationResult {
   const schema =
-    schemas[toolName];
+    toolSchemas[
+      toolName as keyof
+        typeof toolSchemas
+    ];
 
-  if (!schema) {
+
+  if (
+    !schema
+  ) {
     return {
-      success: false,
+      success:
+        false,
 
       message:
-        `Validation blocked unknown tool: ${toolName}`,
+        `Unknown native tool: ${toolName}`,
     };
   }
 
 
   /*
-  Arguments must be an object.
+  Ollama normally gives us an object.
+
+  This fallback also safely supports
+  JSON-string arguments if needed.
   */
 
-  if (
-    rawArgs === null ||
-    typeof rawArgs !==
-      "object" ||
-    Array.isArray(
-      rawArgs
-    )
-  ) {
-    return {
-      success: false,
+  let candidate:
+    unknown =
+    rawArgs;
 
-      message:
-        `Invalid arguments for ${toolName}: expected an object.`,
-    };
+
+  if (
+    typeof candidate ===
+    "string"
+  ) {
+    try {
+      candidate =
+        JSON.parse(
+          candidate
+        );
+    } catch {
+      return {
+        success:
+          false,
+
+        message:
+          "Tool arguments were not valid JSON.",
+      };
+    }
   }
 
 
   const result =
     schema.safeParse(
-      rawArgs
+      candidate
     );
 
 
@@ -374,18 +568,20 @@ export function validateNativeToolCall(
     !result.success
   ) {
     return {
-      success: false,
+      success:
+        false,
 
       message:
-        `Invalid arguments for ${toolName}: ${formatValidationError(
+        formatValidationError(
           result.error
-        )}`,
+        ),
     };
   }
 
 
   return {
-    success: true,
+    success:
+      true,
 
     args:
       result.data as Record<
