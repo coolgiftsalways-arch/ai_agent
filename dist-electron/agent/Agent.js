@@ -10,6 +10,9 @@ import { MemoryTool } from "../tools/MemoryTool.js";
 import { MemoryManager } from "../memory/MemoryManager.js";
 import { GmailTool } from "../tools/GmailTool.js";
 import { Executor } from "./Executor.js";
+import { resolveFastFileCommand } from "./FileFastPath.js";
+import { resolveMultiStepFileCommand } from "./FileMultiStepFastPath.js";
+import { formatFileResult } from "./FileResultFormatter.js";
 import { detectToolRequirement, } from "./ToolRequirementDetector.js";
 import { detectBrowserRequirement } from "./BrowserRequirementDetector.js";
 import { GmailComposeManager, } from "./GmailComposeManager.js";
@@ -630,6 +633,225 @@ export class Agent {
             this.memoryManager.rememberToolResult(toolName, result);
         return this.generatedFinalAnswer(answer);
     }
+    /**
+     * Fast, read-only Gmail actions. Ambiguous requests fall back to Ollama.
+     * All API calls still pass through validation, Executor and permissions.
+     * Never send or draft email from this path.
+     */
+    async tryFastGmailCommand(userInput) {
+        const input = userInput.trim();
+        const normalized = input.replace(/[.!?]+$/, "").trim();
+        // Compound or multiline requests need explicit sequencing; do not
+        // mistake multiple Gmail commands for a single read-only action.
+        if (/[\r\n]/.test(normalized))
+            return null;
+        // Only exact, safe patterns are eligible. Never intercept a send,
+        // compose, draft, reply, forward, delete, archive or mark request.
+        if (/\b(send|compose|draft|reply|forward|delete|archive|mark|move|label|unsubscribe)\b/i.test(normalized)) {
+            return null;
+        }
+        // Accept both "5 emails, include ..." and "5 emails. Include ...".
+        const recentListMatch = normalized.match(/^(?:please\s+)?(?:show|list|display|get)(?:\s+me)?\s+(?:my\s+)?(?:latest|recent|newest|last)\s+(\d{1,2})\s+(?:emails|email messages|gmail messages)(?:\s*[.,;]?\s*include\s+(?:the\s+)?sender\s*,\s*subject\s*,?\s*and\s+date)?$/i);
+        const recentDefaultMatch = /^(?:please\s+)?(?:show|list|display|get)(?:\s+me)?\s+(?:my\s+)?(?:latest|recent|newest)\s+(?:emails|email messages|gmail messages)$/i.test(normalized);
+        const latestFullMatch = /^(?:please\s+)?(?:read|open|show)(?:\s+me)?\s+(?:my\s+)?(?:latest|newest|most recent|last)\s+(?:email|gmail|email message)(?:\s+and\s+(?:show(?:\s+me)?\s+)?(?:its\s+)?(?:complete|full|entire)\s+body(?:,?\s+not\s+just\s+the\s+snippet)?)?(?:\s+(?:in full|completely|fully))?$/i.test(normalized);
+        const idMatch = normalized.match(/^(?:please\s+)?(?:read|open|show)(?:\s+me)?\s+(?:email|gmail|message)(?:\s+(?:with\s+)?id)?\s+([a-z0-9]{10,100})$/i);
+        let action;
+        let limit = 5;
+        let messageId = "";
+        if (recentListMatch) {
+            action = "list";
+            limit = Number(recentListMatch[1]);
+            if (limit < 1 || limit > 25)
+                return null;
+        }
+        else if (recentDefaultMatch) {
+            action = "list";
+        }
+        else if (latestFullMatch) {
+            action = "latest";
+        }
+        else if (idMatch) {
+            action = "id";
+            messageId = idMatch[1];
+        }
+        else {
+            return null;
+        }
+        const started = performance.now();
+        console.log(`[GmailFastPath] ${action}`);
+        const executeReadOnly = async (toolName, rawArgs) => {
+            const validation = validateAgentToolCall(toolName, rawArgs);
+            if (!validation.success) {
+                return { success: false, message: validation.message };
+            }
+            const request = mapAgentToolCall(toolName, validation.args);
+            if (!request || request.tool !== "gmail" ||
+                !["recent", "read"].includes(request.action)) {
+                return { success: false, message: "Gmail action is unavailable." };
+            }
+            return this.executor.execute(request);
+        };
+        const failure = (result) => this.isPermissionDenied(result)
+            ? "Permission denied. Gmail was not accessed."
+            : `Gmail request failed: ${String(result.message ?? "Unknown error")}`;
+        try {
+            if (action === "list") {
+                const result = await executeReadOnly("gmail_recent", { limit });
+                if (!result.success)
+                    return this.generatedPrivateFinalAnswer(failure(result));
+                const answer = this.formatDirectGmailResult("gmail_recent", result, userInput);
+                return this.generatedPrivateFinalAnswer(answer ?? "Gmail returned an unexpected email list.");
+            }
+            if (action === "latest") {
+                const recent = await executeReadOnly("gmail_recent", { limit: 1 });
+                if (!recent.success)
+                    return this.generatedPrivateFinalAnswer(failure(recent));
+                const data = recent.data;
+                const id = data?.emails?.[0]?.id;
+                if (typeof id !== "string" || !id.trim()) {
+                    return this.generatedPrivateFinalAnswer("No recent inbox email was found to read.");
+                }
+                messageId = id;
+            }
+            const result = await executeReadOnly("gmail_read", { id: messageId });
+            if (!result.success)
+                return this.generatedPrivateFinalAnswer(failure(result));
+            const data = result.data;
+            if (typeof data?.body !== "string" || !data.body.trim()) {
+                return this.generatedPrivateFinalAnswer("Gmail retrieved the message, but it did not contain a readable full body. The preview is not a substitute for the complete email.");
+            }
+            const answer = this.formatDirectGmailResult("gmail_read", result, userInput);
+            return this.generatedPrivateFinalAnswer(answer ?? "Gmail returned an unexpected message format.");
+        }
+        finally {
+            console.log(`[GmailFastPath] Completed in ${((performance.now() - started) / 1000).toFixed(2)}s`);
+        }
+    }
+    /** Handle safe file commands directly using the existing validation and permissions. */
+    /**
+     * Optimized folder + file creation.
+     *
+     * Uses the existing validator, executor,
+     * permission manager, and FileTool.
+     *
+     * Never calls Ollama for recognized requests.
+     */
+    async tryFastMultiStepFileCommand(userInput) {
+        const resolution = resolveMultiStepFileCommand(userInput);
+        if (resolution.status === "unmatched") {
+            return null;
+        }
+        if (resolution.status === "clarify") {
+            return this.generatedPrivateFinalAnswer(resolution.message);
+        }
+        const { folderPath, filePath, content } = resolution.plan;
+        const started = performance.now();
+        console.log("[FileMultiStep] folder + file", {
+            folderPath,
+            filePath,
+        });
+        /**
+         * Execute through existing security pipeline.
+         * Never invoke FileTool directly.
+         */
+        const executeFile = async (toolName, args) => {
+            const validation = validateAgentToolCall(toolName, args);
+            if (!validation.success) {
+                return {
+                    success: false,
+                    message: String(validation.message),
+                };
+            }
+            const request = mapAgentToolCall(toolName, validation.args);
+            if (!request || request.tool !== "file") {
+                return {
+                    success: false,
+                    message: "File tool mapping unavailable.",
+                };
+            }
+            return this.executor.execute(request);
+        };
+        /**
+         * Check both destinations before writing.
+         *
+         * Avoid overwriting an existing file
+         * or modifying an existing folder.
+         */
+        for (const target of [filePath, folderPath]) {
+            const result = await executeFile("file_exists", { path: target });
+            if (!result.success) {
+                return this.generatedPrivateFinalAnswer(`Could not safely check ${target}: ` +
+                    String(result.message ?? "Unknown error"));
+            }
+            const data = result.data;
+            if (!data ||
+                typeof data !== "object" ||
+                typeof data.exists !==
+                    "boolean") {
+                return this.generatedPrivateFinalAnswer("File existence check returned an unexpected result. Nothing was created.");
+            }
+            const exists = data.exists;
+            if (exists && target === filePath) {
+                return this.generatedPrivateFinalAnswer(`File already exists: ${filePath}\n` +
+                    "Nothing was overwritten.");
+            }
+            if (exists && target === folderPath) {
+                return this.generatedPrivateFinalAnswer(`Folder already exists: ${folderPath}\n` +
+                    "No files were created inside the existing folder.");
+            }
+        }
+        /**
+         * Step 1 — Create folder
+         */
+        const folderResult = await executeFile("file_create_folder", { path: folderPath });
+        if (!folderResult.success) {
+            return this.generatedPrivateFinalAnswer(`Folder creation failed: ${String(folderResult.message ?? "Unknown error")}\nFile was not created.`);
+        }
+        /**
+         * Step 2 — Create file with exact content
+         */
+        const fileResult = await executeFile("file_create_file", {
+            path: filePath,
+            content,
+        });
+        if (!fileResult.success) {
+            return this.generatedPrivateFinalAnswer(`Folder created: ${folderPath}\n` +
+                `File creation failed: ${String(fileResult.message ?? "Unknown error")}\n` +
+                "The folder was left in place.");
+        }
+        console.log(`[FileMultiStep] Completed in ${((performance.now() - started) /
+            1000).toFixed(2)}s`);
+        return this.generatedPrivateFinalAnswer(`Folder created: ${folderPath}\n` +
+            `File created: ${filePath}\n` +
+            `Content: ${content}`);
+    }
+    async tryFastFileCommand(userInput) {
+        const resolved = resolveFastFileCommand(userInput);
+        if (resolved.status === "unmatched")
+            return null;
+        if (resolved.status === "ambiguous") {
+            return this.generatedPrivateFinalAnswer(resolved.message);
+        }
+        const command = resolved.command;
+        const started = performance.now();
+        console.log(`[FileFastPath] ${command.toolName}`, command.args);
+        const validation = validateAgentToolCall(command.toolName, command.args);
+        if (!validation.success) {
+            return this.generatedPrivateFinalAnswer(`File command rejected: ${validation.message}`);
+        }
+        const request = mapAgentToolCall(command.toolName, validation.args);
+        if (!request || request.tool !== "file") {
+            return this.generatedPrivateFinalAnswer("File command mapping is unavailable.");
+        }
+        // Never call FileTool directly: existing Executor checks permissions.
+        const result = await this.executor.execute(request);
+        console.log(`[FileFastPath] Completed in ${((performance.now() - started) / 1000).toFixed(2)}s`);
+        if (!result.success && this.isPermissionDenied(result)) {
+            return this.generatedPrivateFinalAnswer("Permission denied. The file action was not performed.");
+        }
+        // Do not store arbitrary file contents or directory inventories in SQLite memory.
+        return this.generatedPrivateFinalAnswer(formatFileResult(command.toolName, result));
+    }
     async run(userInput) {
         /*
       
@@ -824,7 +1046,17 @@ For current computer state, use real tools.
     
         ==========================================
     
+    
         */
+        const multiStepFileAnswer = await this.tryFastMultiStepFileCommand(userInput);
+        if (multiStepFileAnswer !== null)
+            return multiStepFileAnswer;
+        const fastFileAnswer = await this.tryFastFileCommand(userInput);
+        if (fastFileAnswer !== null)
+            return fastFileAnswer;
+        const fastGmailAnswer = await this.tryFastGmailCommand(userInput);
+        if (fastGmailAnswer !== null)
+            return fastGmailAnswer;
         const fastBrowserAnswer = await this.tryFastBrowserCommand(userInput);
         if (fastBrowserAnswer !== null)
             return fastBrowserAnswer;
