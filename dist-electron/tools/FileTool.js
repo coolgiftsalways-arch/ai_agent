@@ -1,661 +1,432 @@
-import fs from "fs/promises";
-import path from "path";
+import fs from "node:fs/promises";
+import { constants } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+/** NEXA filesystem tool. All paths are restricted to configured allowed roots. */
 export class FileTool {
     name = "file";
     allowedRoots;
-    constructor(allowedRoots = [
-        process.cwd(),
-    ]) {
-        this.allowedRoots =
-            allowedRoots.map((root) => path.resolve(root));
+    recoveryDirectory;
+    constructor(allowedRoots = [process.cwd()]) {
+        if (!allowedRoots.length)
+            throw new Error("At least one allowed filesystem root is required.");
+        this.allowedRoots = allowedRoots.map((root) => path.resolve(root));
+        this.recoveryDirectory = path.join(this.allowedRoots[0], ".nexa-recovery");
     }
-    /*
-    ==========================================
-    NORMALIZE PATH FOR COMPARISON
-    ==========================================
-    */
-    normalizeForComparison(value) {
+    normalized(value) {
         const resolved = path.resolve(value);
-        if (process.platform === "win32") {
-            return resolved.toLowerCase();
-        }
-        return resolved;
+        return process.platform === "win32" ? resolved.toLowerCase() : resolved;
     }
-    /*
-    ==========================================
-    CHECK IF PATH IS INSIDE ROOT
-    ==========================================
-    */
-    isInsideRoot(candidate, root) {
-        const normalizedCandidate = this.normalizeForComparison(candidate);
-        const normalizedRoot = this.normalizeForComparison(root);
-        const relative = path.relative(normalizedRoot, normalizedCandidate);
-        return (relative === "" ||
-            (!relative.startsWith("..") &&
-                !path.isAbsolute(relative)));
+    within(candidate, root) {
+        const relative = path.relative(this.normalized(root), this.normalized(candidate));
+        return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
     }
-    /*
-    ==========================================
-    LEXICAL ALLOWED PATH CHECK
-    ==========================================
-  
-    Blocks obvious paths such as:
-  
-    C:\Windows
-  
-    before touching the filesystem.
-    */
-    isLexicallyAllowed(requestedPath) {
-        const requested = path.resolve(requestedPath);
-        return this.allowedRoots.some((root) => this.isInsideRoot(requested, root));
-    }
-    /*
-    ==========================================
-    RESOLVE LEXICAL PATH
-    ==========================================
-    */
-    resolveLexicalPath(requestedPath) {
-        let finalPath;
-        if (path.isAbsolute(requestedPath)) {
-            finalPath =
-                path.resolve(requestedPath);
-        }
-        else {
-            finalPath =
-                path.resolve(this.allowedRoots[0], requestedPath);
-        }
-        if (!this.isLexicallyAllowed(finalPath)) {
-            throw new Error(`Access denied. Path is outside allowed folders: ${finalPath}`);
-        }
-        return finalPath;
-    }
-    /*
-    ==========================================
-    GET REAL ALLOWED ROOTS
-    ==========================================
-  
-    Windows junctions and symlinks can make
-    a path LOOK like it is inside S:\ while
-    actually pointing somewhere else.
-  
-    fs.realpath() reveals the real location.
-    */
-    async getAllowedRealRoots() {
-        const roots = [];
+    async realRoots() {
+        const result = [];
         for (const root of this.allowedRoots) {
+            // A missing allowed root does not grant access to a different location.
             try {
-                const real = await fs.realpath(root);
-                roots.push(this.normalizeForComparison(real));
+                result.push(await fs.realpath(root));
             }
-            catch {
-                /*
-                Allowed roots should normally exist.
-        
-                If one does not, keep its resolved
-                form rather than crashing setup.
-                */
-                roots.push(this.normalizeForComparison(root));
-            }
+            catch { /* Missing roots cannot be used until they exist. */ }
         }
-        return roots;
+        return result;
     }
-    /*
-    ==========================================
-    CHECK REAL PATH AGAINST ALLOWED ROOTS
-    ==========================================
-    */
-    async isRealPathAllowed(realPath) {
-        const allowedRealRoots = await this.getAllowedRealRoots();
-        return allowedRealRoots.some((root) => this.isInsideRoot(realPath, root));
+    lexical(requested) {
+        if (!requested || typeof requested !== "string")
+            throw new Error("Path is required.");
+        const target = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(this.allowedRoots[0], requested);
+        if (!this.allowedRoots.some((root) => this.within(target, root))) {
+            throw new Error(`Access denied. Path is outside allowed folders: ${target}`);
+        }
+        return target;
     }
-    /*
-    ==========================================
-    FIND NEAREST EXISTING ANCESTOR
-    ==========================================
-  
-    Needed when creating:
-  
-    S:\Project\new\folder\file.txt
-  
-    The final file may not exist yet.
-  
-    We walk upward until an existing directory
-    or filesystem entry is found, then verify
-    its REAL location.
-    */
-    async findNearestExistingAncestor(requestedPath) {
-        let current = path.resolve(requestedPath);
+    async nearestExisting(requested) {
+        let current = requested;
         while (true) {
             try {
-                /*
-                lstat does NOT silently follow a
-                symlink/junction here.
-        
-                That is useful because a broken
-                symlink should not be treated as a
-                normal nonexistent path.
-                */
                 await fs.lstat(current);
                 return current;
             }
             catch (error) {
-                if (error?.code !== "ENOENT" &&
-                    error?.code !== "ENOTDIR") {
+                if (!this.isCode(error, "ENOENT") && !this.isCode(error, "ENOTDIR"))
                     throw error;
-                }
                 const parent = path.dirname(current);
-                if (parent === current) {
-                    throw new Error(`Unable to find an existing parent for path: ${requestedPath}`);
-                }
-                current =
-                    parent;
+                if (parent === current)
+                    throw new Error(`No existing parent for path: ${requested}`);
+                current = parent;
             }
         }
     }
-    /*
-    ==========================================
-    REAL-PATH SECURITY CHECK
-    ==========================================
-  
-    Example attack:
-  
-    S:\safe-link
-        ↓ Windows junction
-    C:\Windows
-  
-    Request:
-  
-    S:\safe-link\win.ini
-  
-    Lexically it looks safe.
-  
-    realpath() exposes C:\Windows and blocks it.
-    */
-    async assertRealLocationAllowed(requestedPath) {
-        const existingAncestor = await this.findNearestExistingAncestor(requestedPath);
-        let realAncestor;
+    async secure(requested, mustExist = false) {
+        const target = this.lexical(requested);
+        if (mustExist)
+            await fs.lstat(target);
+        const ancestor = await this.nearestExisting(target);
+        let actual;
         try {
-            realAncestor =
-                await fs.realpath(existingAncestor);
+            actual = await fs.realpath(ancestor);
         }
         catch {
-            /*
-            An existing but unresolved symlink /
-            junction is suspicious.
-      
-            Fail closed.
-            */
-            throw new Error(`Access denied. Unable to resolve real filesystem path: ${existingAncestor}`);
+            throw new Error(`Access denied. Cannot resolve real path: ${ancestor}`);
         }
-        const allowed = await this.isRealPathAllowed(realAncestor);
-        if (!allowed) {
-            throw new Error(`Access denied. Real path escapes allowed folders: ${requestedPath} -> ${realAncestor}`);
+        if (!(await this.realRoots()).some((root) => this.within(actual, root))) {
+            throw new Error(`Access denied. Real path escapes allowed folders: ${target} -> ${actual}`);
         }
+        return target;
     }
-    /*
-    ==========================================
-    EXISTING SAFE PATH
-    ==========================================
-  
-    Used for:
-  
-    read
-    list
-    delete
-    rename source
-    move source
-    */
-    async resolveExistingSafePath(requestedPath) {
-        const lexicalPath = this.resolveLexicalPath(requestedPath);
-        /*
-        Confirm entry exists.
-        */
-        await fs.lstat(lexicalPath);
-        /*
-        Confirm junction/symlink cannot escape.
-        */
-        await this.assertRealLocationAllowed(lexicalPath);
-        return lexicalPath;
+    isCode(error, code) {
+        return !!error && typeof error === "object" && "code" in error && error.code === code;
     }
-    /*
-    ==========================================
-    TARGET SAFE PATH
-    ==========================================
-  
-    Used for paths that may not exist yet:
-  
-    create
-    write
-    rename destination
-    move destination
-    existence checks
-    */
-    async resolveTargetSafePath(requestedPath) {
-        const lexicalPath = this.resolveLexicalPath(requestedPath);
-        await this.assertRealLocationAllowed(lexicalPath);
-        return lexicalPath;
-    }
-    /*
-    ==========================================
-    ENSURE PARENT DIRECTORY EXISTS
-    ==========================================
-    */
-    async ensureParentDirectory(filePath) {
-        const parent = path.dirname(filePath);
-        const root = path.parse(filePath).root;
-        if (path.resolve(parent) ===
-            path.resolve(root)) {
-            return;
-        }
-        /*
-        Verify parent destination before creating.
-        */
-        await this.resolveTargetSafePath(parent);
-        await fs.mkdir(parent, {
-            recursive: true,
-        });
-        /*
-        Verify again after creation.
-    
-        This is defense-in-depth against
-        unexpected filesystem indirection.
-        */
-        await this.resolveExistingSafePath(parent);
-    }
-    /*
-    ==========================================
-    PROTECT IMPORTANT ROOTS
-    ==========================================
-    */
-    async isProtectedRoot(requestedPath) {
-        const normalized = this.normalizeForComparison(requestedPath);
-        /*
-        Protect configured lexical roots.
-        */
-        const lexicalMatch = this.allowedRoots.some((root) => this.normalizeForComparison(root) ===
-            normalized);
-        if (lexicalMatch) {
+    async exists(target) {
+        try {
+            await fs.lstat(target);
             return true;
         }
-        /*
-        Also protect real versions of roots.
-        */
-        const realRoots = await this.getAllowedRealRoots();
-        try {
-            const realRequested = this.normalizeForComparison(await fs.realpath(requestedPath));
-            return realRoots.some((root) => root ===
-                realRequested);
-        }
-        catch {
-            return false;
-        }
-    }
-    /*
-    ==========================================
-    CREATE FOLDER
-    ==========================================
-    */
-    async createFolder(folderPath) {
-        const safePath = await this.resolveTargetSafePath(folderPath);
-        await fs.mkdir(safePath, {
-            recursive: true,
-        });
-        /*
-        Verify the resulting real location.
-        */
-        await this.resolveExistingSafePath(safePath);
-        return {
-            success: true,
-            message: `Folder created: ${safePath}`,
-            data: {
-                path: safePath,
-            },
-        };
-    }
-    /*
-    ==========================================
-    CREATE FILE
-    ==========================================
-    */
-    async createFile(filePath, content = "") {
-        const safePath = await this.resolveTargetSafePath(filePath);
-        await this.ensureParentDirectory(safePath);
-        try {
-            await fs.writeFile(safePath, content, {
-                encoding: "utf8",
-                /*
-                Do NOT overwrite an existing file.
-                */
-                flag: "wx",
-            });
-        }
         catch (error) {
-            if (error?.code ===
-                "EEXIST") {
-                return {
-                    success: false,
-                    message: `File already exists: ${safePath}`,
-                };
-            }
+            if (this.isCode(error, "ENOENT"))
+                return false;
             throw error;
         }
-        /*
-        Verify the resulting file did not resolve
-        outside the allowed workspace.
-        */
-        await this.resolveExistingSafePath(safePath);
-        return {
-            success: true,
-            message: `File created: ${safePath}`,
-            data: {
-                path: safePath,
-            },
-        };
     }
-    /*
-    ==========================================
-    READ FILE
-    ==========================================
-    */
-    async readFile(filePath) {
-        const safePath = await this.resolveExistingSafePath(filePath);
-        const content = await fs.readFile(safePath, "utf8");
-        return {
-            success: true,
-            message: `File read successfully: ${safePath}`,
-            data: {
-                path: safePath,
-                content,
-            },
-        };
+    async protectRoot(target) {
+        if (this.allowedRoots.some((root) => this.normalized(root) === this.normalized(target))) {
+            throw new Error(`Protected allowed root: ${target}`);
+        }
+        // Do not expose the internal recovery store or allow deletion of its ancestor.
+        if (this.within(target, this.recoveryDirectory) || this.within(this.recoveryDirectory, target)) {
+            throw new Error(`Protected NEXA recovery storage: ${target}`);
+        }
+        const realTarget = await fs.realpath(target).catch(() => null);
+        if (realTarget && (await this.realRoots()).some((root) => this.normalized(root) === this.normalized(realTarget))) {
+            throw new Error(`Protected allowed real root: ${target}`);
+        }
     }
-    /*
-    ==========================================
-    WRITE / REPLACE FILE CONTENT
-    ==========================================
-    */
-    async writeFile(filePath, content) {
-        const safePath = await this.resolveTargetSafePath(filePath);
-        await this.ensureParentDirectory(safePath);
-        /*
-        If the file already exists and is a
-        junction/symlink, resolveTargetSafePath()
-        already checked its real location.
-        */
-        await fs.writeFile(safePath, content, {
-            encoding: "utf8",
-        });
-        await this.resolveExistingSafePath(safePath);
-        return {
-            success: true,
-            message: `File written: ${safePath}`,
-            data: {
-                path: safePath,
-            },
-        };
+    async regularFile(requested) {
+        const target = await this.secure(requested, true);
+        const info = await fs.lstat(target);
+        if (!info.isFile() || info.isSymbolicLink())
+            throw new Error(`Expected a regular file: ${target}`);
+        return target;
     }
-    /*
-    ==========================================
-    LIST FILES
-    ==========================================
-    */
-    async listFiles(folderPath = ".") {
-        const safePath = await this.resolveExistingSafePath(folderPath);
-        const entries = await fs.readdir(safePath, {
-            withFileTypes: true,
-        });
-        const items = entries.map((entry) => ({
-            name: entry.name,
-            type: entry.isDirectory()
-                ? "folder"
-                : entry.isSymbolicLink()
-                    ? "link"
-                    : "file",
-        }));
-        return {
-            success: true,
-            message: `Found ${items.length} items.`,
-            data: {
-                path: safePath,
-                items,
-            },
-        };
+    async directory(requested) {
+        const target = await this.secure(requested, true);
+        const info = await fs.lstat(target);
+        if (!info.isDirectory() || info.isSymbolicLink())
+            throw new Error(`Expected a directory: ${target}`);
+        return target;
     }
-    /*
-    ==========================================
-    CHECK FILE / FOLDER EXISTS
-    ==========================================
-    */
-    async fileExists(filePath) {
-        /*
-        Even existence checks must not allow
-        an outside-workspace junction escape.
-        */
-        const safePath = await this.resolveTargetSafePath(filePath);
+    async createParent(target) {
+        const parent = path.dirname(target);
+        await this.secure(parent);
+        await fs.mkdir(parent, { recursive: true });
+        await this.secure(parent, true);
+    }
+    async emptyDestination(target) {
+        if (await this.exists(target))
+            throw new Error(`Destination already exists: ${target}. Nothing was overwritten.`);
+    }
+    async ensureRecoveryDirectory() {
+        await this.secure(this.recoveryDirectory);
+        await fs.mkdir(this.recoveryDirectory, { recursive: true });
+        await this.secure(this.recoveryDirectory, true);
+        const info = await fs.lstat(this.recoveryDirectory);
+        if (!info.isDirectory() || info.isSymbolicLink())
+            throw new Error("Invalid NEXA recovery directory.");
+    }
+    async saveRecovery(entry) {
+        await this.ensureRecoveryDirectory();
+        const metadata = path.join(this.recoveryDirectory, `${entry.recoveryId}.json`);
+        await fs.writeFile(metadata, JSON.stringify(entry, null, 2), { flag: "wx", encoding: "utf8" });
+    }
+    async makeBackup(target) {
+        await this.ensureRecoveryDirectory();
+        const recoveryId = randomUUID();
+        const storedPath = path.join(this.recoveryDirectory, `${recoveryId}.bak`);
+        await fs.copyFile(target, storedPath, constants.COPYFILE_EXCL);
         try {
-            await fs.access(safePath);
-            /*
-            If it exists, verify the actual path.
-            */
-            await this.resolveExistingSafePath(safePath);
-            return {
-                success: true,
-                message: "Path exists.",
-                data: {
-                    path: safePath,
-                    exists: true,
-                },
-            };
+            await this.saveRecovery({ recoveryId, kind: "backup", originalPath: target, storedPath, createdAt: new Date().toISOString() });
         }
         catch (error) {
-            /*
-            Security failures must NOT be converted
-            into a simple "does not exist".
-            */
-            const message = String(error?.message ??
-                error ??
-                "");
-            if (message
-                .toLowerCase()
-                .includes("access denied")) {
-                throw error;
+            await fs.rm(storedPath, { force: true });
+            throw error;
+        }
+        return recoveryId;
+    }
+    async registerMove(originalPath, newPath) {
+        const recoveryId = randomUUID();
+        await this.saveRecovery({ recoveryId, kind: "move", originalPath, newPath, createdAt: new Date().toISOString() });
+        return recoveryId;
+    }
+    async createFolder(folderPath) {
+        const target = await this.secure(folderPath);
+        await this.protectRoot(target);
+        await this.emptyDestination(target);
+        await fs.mkdir(target, { recursive: true });
+        await this.directory(target);
+        return { success: true, message: `Folder created: ${target}`, data: { path: target } };
+    }
+    async createFile(filePath, content = "") {
+        const target = await this.secure(filePath);
+        await this.protectRoot(target);
+        await this.createParent(target);
+        await fs.writeFile(target, content, { flag: "wx", encoding: "utf8" });
+        await this.regularFile(target);
+        return { success: true, message: `File created: ${target}`, data: { path: target } };
+    }
+    async readFile(filePath) {
+        const target = await this.regularFile(filePath);
+        const content = await fs.readFile(target, "utf8");
+        return { success: true, message: `File read: ${target}`, data: { path: target, content } };
+    }
+    async writeFile(filePath, content) {
+        const target = await this.regularFile(filePath);
+        await this.protectRoot(target);
+        const recoveryId = await this.makeBackup(target);
+        await fs.writeFile(target, content, { encoding: "utf8" });
+        return { success: true, message: `File updated: ${target}`, data: { path: target, recoveryId } };
+    }
+    async editFile(filePath, search, replacement, replaceAll = false) {
+        if (!search)
+            throw new Error("Exact search text cannot be empty.");
+        const target = await this.regularFile(filePath);
+        await this.protectRoot(target);
+        const original = await fs.readFile(target, "utf8");
+        const occurrences = original.split(search).length - 1;
+        if (!occurrences)
+            throw new Error("Exact search text was not found. No changes made.");
+        if (occurrences > 1 && !replaceAll)
+            throw new Error(`${occurrences} matches found. Set replaceAll to true to change all matches.`);
+        const updated = replaceAll ? original.split(search).join(replacement) : original.replace(search, replacement);
+        const recoveryId = await this.makeBackup(target);
+        await fs.writeFile(target, updated, "utf8");
+        return { success: true, message: `Updated ${occurrences} occurrence(s) in ${target}`, data: { path: target, matches: occurrences, recoveryId } };
+    }
+    async listFiles(folderPath = ".") {
+        const target = await this.directory(folderPath);
+        const items = (await fs.readdir(target, { withFileTypes: true })).map((item) => ({
+            name: item.name, type: item.isSymbolicLink() ? "link" : item.isDirectory() ? "folder" : "file",
+        }));
+        return { success: true, message: `Found ${items.length} items.`, data: { path: target, items } };
+    }
+    async fileExists(requestedPath) {
+        const target = await this.secure(requestedPath);
+        const found = await this.exists(target);
+        return { success: true, message: found ? "Path exists." : "Path does not exist.", data: { path: target, exists: found } };
+    }
+    async searchFiles(folderPath, query, maxResults = 100) {
+        const base = await this.directory(folderPath);
+        if (!query.trim())
+            throw new Error("Search query cannot be empty.");
+        if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 100)
+            throw new Error("maxResults must be 1 to 100.");
+        const items = [];
+        const pending = [{ folder: base, depth: 0 }];
+        let inspected = 0;
+        let truncated = false;
+        while (pending.length && inspected < 20000 && items.length < maxResults) {
+            const { folder, depth } = pending.pop();
+            const entries = await fs.readdir(folder, { withFileTypes: true });
+            for (const entry of entries) {
+                if (++inspected > 20000) {
+                    truncated = true;
+                    break;
+                }
+                if (entry.isSymbolicLink())
+                    continue;
+                const absolute = path.join(folder, entry.name);
+                if (entry.name.toLowerCase().includes(query.toLowerCase())) {
+                    items.push({ name: entry.name, path: absolute, type: entry.isDirectory() ? "folder" : "file" });
+                    if (items.length >= maxResults) {
+                        truncated = true;
+                        break;
+                    }
+                }
+                if (entry.isDirectory() && depth < 20)
+                    pending.push({ folder: absolute, depth: depth + 1 });
+                else if (entry.isDirectory())
+                    truncated = true;
             }
-            return {
-                success: true,
-                message: "Path does not exist.",
-                data: {
-                    path: safePath,
-                    exists: false,
-                },
-            };
         }
+        if (pending.length || inspected >= 20000)
+            truncated = true;
+        return { success: true, message: `Found ${items.length} matching items.`, data: { path: base, query, items, truncated } };
     }
-    /*
-    ==========================================
-    RENAME FILE / FOLDER
-    ==========================================
-  
-    Example:
-  
-    old:
-    S:\react-app
-  
-    new:
-    react-final
-  
-    Result:
-  
-    S:\react-final
-  
-    NOT:
-  
-    S:\ai-agent-project\react-final
-    */
+    async checkDestination(oldPath, newPath, sourceIsFolder) {
+        const destination = await this.secure(newPath);
+        await this.protectRoot(destination);
+        await this.emptyDestination(destination);
+        if (this.normalized(oldPath) === this.normalized(destination))
+            throw new Error("Source and destination are identical.");
+        if (sourceIsFolder && this.within(destination, oldPath))
+            throw new Error("Cannot place a folder inside itself.");
+        return destination;
+    }
     async renameFile(oldPath, newPath) {
-        const safeOld = await this.resolveExistingSafePath(oldPath);
-        let requestedNewPath;
-        if (path.isAbsolute(newPath)) {
-            requestedNewPath =
-                newPath;
+        const source = await this.secure(oldPath, true);
+        await this.protectRoot(source);
+        const info = await fs.lstat(source);
+        if (info.isSymbolicLink())
+            throw new Error("Renaming symbolic links is not supported.");
+        const destinationInput = path.isAbsolute(newPath) ? newPath : path.resolve(path.dirname(source), newPath);
+        const dest = await this.checkDestination(source, destinationInput, info.isDirectory());
+        await this.createParent(dest);
+        await this.emptyDestination(dest);
+        // Record the undo information BEFORE moving so a metadata failure
+        // cannot turn a successful rename into an unreported change.
+        const recoveryId = await this.registerMove(source, dest);
+        try {
+            await fs.rename(source, dest); // EXDEV fails closed; no destructive cross-drive fallback.
         }
-        else {
-            /*
-            Relative rename stays beside
-            the original item.
-            */
-            requestedNewPath =
-                path.resolve(path.dirname(safeOld), newPath);
+        catch (error) {
+            await fs.rm(path.join(this.recoveryDirectory, `${recoveryId}.json`), { force: true }).catch(() => { });
+            throw error;
         }
-        const safeNew = await this.resolveTargetSafePath(requestedNewPath);
-        /*
-        ==========================================
-        PREVENT MOVING INSIDE ITSELF
-        ==========================================
-        */
-        const relative = path.relative(this.normalizeForComparison(safeOld), this.normalizeForComparison(safeNew));
-        if (relative !== "" &&
-            !relative.startsWith("..") &&
-            !path.isAbsolute(relative)) {
-            return {
-                success: false,
-                message: `Cannot move a folder inside itself: ${safeOld} → ${safeNew}`,
-            };
-        }
-        /*
-        Do not allow renaming protected roots.
-        */
-        if (await this.isProtectedRoot(safeOld)) {
-            return {
-                success: false,
-                message: `Refusing to rename protected root: ${safeOld}`,
-            };
-        }
-        await this.ensureParentDirectory(safeNew);
-        await fs.rename(safeOld, safeNew);
-        /*
-        Verify destination after move.
-        */
-        await this.resolveExistingSafePath(safeNew);
-        return {
-            success: true,
-            message: `Renamed:\n${safeOld}\n→ ${safeNew}`,
-            data: {
-                oldPath: safeOld,
-                newPath: safeNew,
-            },
-        };
+        await this.secure(dest, true);
+        return { success: true, message: `Renamed/moved: ${source} → ${dest}`, data: { oldPath: source, newPath: dest, recoveryId } };
     }
-    /*
-    ==========================================
-    MOVE FILE / FOLDER
-    ==========================================
-    */
     async moveFile(oldPath, newPath) {
         return this.renameFile(oldPath, newPath);
     }
-    /*
-    ==========================================
-    DELETE FILE
-    ==========================================
-    */
+    async copyFile(oldPath, newPath) {
+        const source = await this.regularFile(oldPath);
+        const dest = await this.checkDestination(source, newPath, false);
+        await this.createParent(dest);
+        await fs.copyFile(source, dest, constants.COPYFILE_EXCL);
+        await this.regularFile(dest);
+        return { success: true, message: `File copied: ${source} → ${dest}`, data: { oldPath: source, newPath: dest } };
+    }
+    async copyDirectoryTree(source, dest) {
+        // Fail closed on symlinks and Windows junctions in recursive copies.
+        await fs.mkdir(dest);
+        for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+            const from = path.join(source, entry.name);
+            const to = path.join(dest, entry.name);
+            const info = await fs.lstat(from);
+            if (info.isSymbolicLink())
+                throw new Error(`Folder contains a symbolic link/junction: ${from}`);
+            await this.secure(from, true);
+            if (info.isDirectory())
+                await this.copyDirectoryTree(from, to);
+            else if (info.isFile())
+                await fs.copyFile(from, to, constants.COPYFILE_EXCL);
+            else
+                throw new Error(`Unsupported entry in folder copy: ${from}`);
+        }
+    }
+    async copyFolder(oldPath, newPath) {
+        const source = await this.directory(oldPath);
+        const dest = await this.checkDestination(source, newPath, true);
+        await this.createParent(dest);
+        try {
+            await this.copyDirectoryTree(source, dest);
+        }
+        catch (error) {
+            await fs.rm(dest, { recursive: true, force: true }).catch(() => { });
+            throw error;
+        }
+        await this.directory(dest);
+        return { success: true, message: `Folder copied: ${source} → ${dest}`, data: { oldPath: source, newPath: dest } };
+    }
+    async softDelete(requested, folder) {
+        const source = folder ? await this.directory(requested) : await this.regularFile(requested);
+        await this.protectRoot(source);
+        await this.ensureRecoveryDirectory();
+        const recoveryId = randomUUID();
+        const storedPath = path.join(this.recoveryDirectory, `${recoveryId}.trash`);
+        await fs.rename(source, storedPath); // No permanent removal; fails safely across volumes.
+        try {
+            await this.saveRecovery({
+                recoveryId, kind: folder ? "deletedFolder" : "deletedFile",
+                originalPath: source, storedPath, createdAt: new Date().toISOString(),
+            });
+        }
+        catch (error) {
+            await fs.rename(storedPath, source).catch(() => { });
+            throw error;
+        }
+        return { success: true, message: `${folder ? "Folder" : "File"} moved to NEXA recovery: ${source}`, data: { path: source, recoveryId } };
+    }
     async deleteFile(filePath) {
-        const safePath = await this.resolveExistingSafePath(filePath);
-        if (await this.isProtectedRoot(safePath)) {
-            return {
-                success: false,
-                message: `Refusing to delete protected root: ${safePath}`,
-            };
-        }
-        await fs.unlink(safePath);
-        return {
-            success: true,
-            message: `File deleted: ${safePath}`,
-            data: {
-                path: safePath,
-            },
-        };
+        return this.softDelete(filePath, false);
     }
-    /*
-    ==========================================
-    DELETE FOLDER
-    ==========================================
-    */
     async deleteFolder(folderPath) {
-        const safePath = await this.resolveExistingSafePath(folderPath);
-        /*
-        Never allow deleting:
-    
-        S:\
-    
-        or another configured allowed root such
-        as the AI project itself.
-        */
-        if (await this.isProtectedRoot(safePath)) {
-            return {
-                success: false,
-                message: `Refusing to delete protected root: ${safePath}`,
-            };
-        }
-        await fs.rm(safePath, {
-            recursive: true,
-            force: false,
-        });
-        return {
-            success: true,
-            message: `Folder deleted: ${safePath}`,
-            data: {
-                path: safePath,
-            },
-        };
+        return this.softDelete(folderPath, true);
     }
-    /*
-    ==========================================
-    EXECUTE
-    ==========================================
-    */
+    async restoreFile(recoveryId) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recoveryId)) {
+            throw new Error("Invalid recovery ID.");
+        }
+        await this.ensureRecoveryDirectory();
+        const metadataPath = path.join(this.recoveryDirectory, `${recoveryId}.json`);
+        const entry = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+        if (entry.recoveryId !== recoveryId || entry.consumed)
+            throw new Error("Recovery record is unavailable or already used.");
+        const original = await this.secure(entry.originalPath);
+        await this.protectRoot(original);
+        if (entry.kind === "backup") {
+            if (!entry.storedPath || this.normalized(path.dirname(entry.storedPath)) !== this.normalized(this.recoveryDirectory)) {
+                throw new Error("Invalid recovery backup path.");
+            }
+            const backup = await this.regularFile(entry.storedPath);
+            if (await this.exists(original)) {
+                await this.regularFile(original);
+                await this.makeBackup(original); // Preserve current version before restoring.
+            }
+            else
+                await this.createParent(original);
+            await fs.copyFile(backup, original);
+            return { success: true, message: `Previous version restored: ${original}`, data: { path: original, recoveryId } };
+        }
+        if (entry.kind === "move") {
+            if (!entry.newPath)
+                throw new Error("Invalid move recovery record.");
+            const moved = await this.secure(entry.newPath, true);
+            await this.protectRoot(moved);
+            await this.emptyDestination(original);
+            await this.createParent(original);
+            await fs.rename(moved, original);
+            entry.consumed = true;
+            await fs.writeFile(metadataPath, JSON.stringify(entry, null, 2));
+            return { success: true, message: `Move undone: ${original}`, data: { path: original, recoveryId } };
+        }
+        if (entry.kind !== "deletedFile" && entry.kind !== "deletedFolder")
+            throw new Error("Unknown recovery record kind.");
+        if (!entry.storedPath || this.normalized(path.dirname(entry.storedPath)) !== this.normalized(this.recoveryDirectory)) {
+            throw new Error("Invalid recovery item path.");
+        }
+        const stored = await this.secure(entry.storedPath, true);
+        await this.emptyDestination(original);
+        await this.createParent(original);
+        await fs.rename(stored, original);
+        entry.consumed = true;
+        await fs.writeFile(metadataPath, JSON.stringify(entry, null, 2));
+        return { success: true, message: `Restored: ${original}`, data: { path: original, recoveryId } };
+    }
     async execute(action, parameters) {
         try {
+            const str = (key) => String(parameters[key] ?? "");
             switch (action) {
-                case "createFolder":
-                    return await this.createFolder(String(parameters.path));
-                case "createFile":
-                    return await this.createFile(String(parameters.path), parameters.content !==
-                        undefined
-                        ? String(parameters.content)
-                        : "");
-                case "readFile":
-                    return await this.readFile(String(parameters.path));
-                case "writeFile":
-                    return await this.writeFile(String(parameters.path), String(parameters.content ??
-                        ""));
-                case "listFiles":
-                    return await this.listFiles(parameters.path
-                        ? String(parameters.path)
-                        : ".");
-                case "fileExists":
-                    return await this.fileExists(String(parameters.path));
-                case "renameFile":
-                    return await this.renameFile(String(parameters.oldPath), String(parameters.newPath));
-                case "moveFile":
-                    return await this.moveFile(String(parameters.oldPath), String(parameters.newPath));
-                case "deleteFile":
-                    return await this.deleteFile(String(parameters.path));
-                case "deleteFolder":
-                    return await this.deleteFolder(String(parameters.path));
-                default:
-                    return {
-                        success: false,
-                        message: `Unknown FileTool action: ${action}`,
-                    };
+                case "createFolder": return await this.createFolder(str("path"));
+                case "createFile": return await this.createFile(str("path"), str("content"));
+                case "readFile": return await this.readFile(str("path"));
+                case "writeFile": return await this.writeFile(str("path"), str("content"));
+                case "editFile": return await this.editFile(str("path"), str("search"), str("replacement"), parameters.replaceAll === true);
+                case "listFiles": return await this.listFiles(str("path") || ".");
+                case "fileExists": return await this.fileExists(str("path"));
+                case "searchFiles": return await this.searchFiles(str("path"), str("query"), parameters.maxResults === undefined ? 100 : Number(parameters.maxResults));
+                case "renameFile": return await this.renameFile(str("oldPath"), str("newPath"));
+                case "moveFile": return await this.moveFile(str("oldPath"), str("newPath"));
+                case "copyFile": return await this.copyFile(str("oldPath"), str("newPath"));
+                case "copyFolder": return await this.copyFolder(str("oldPath"), str("newPath"));
+                case "deleteFile": return await this.deleteFile(str("path"));
+                case "deleteFolder": return await this.deleteFolder(str("path"));
+                case "restoreFile": return await this.restoreFile(str("recoveryId"));
+                default: return { success: false, message: `Unknown FileTool action: ${action}` };
             }
         }
         catch (error) {
-            return {
-                success: false,
-                message: error instanceof Error
-                    ? error.message
-                    : String(error),
-            };
+            return { success: false, message: error instanceof Error ? error.message : String(error) };
         }
     }
 }

@@ -1,4 +1,4 @@
-import { z, } from "zod";
+import { z } from "zod";
 /*
 ==========================================
 COMMON SCHEMAS
@@ -25,6 +25,27 @@ const limitSchema = z
     .optional();
 /*
 ==========================================
+EXTENDED FILE SCHEMAS
+==========================================
+*/
+// Do not trim this value: an exact-text edit must preserve whitespace.
+const exactSearchTextSchema = z
+    .string()
+    .min(1, "Exact text to replace is required.")
+    .max(2_000_000, "Search text is too large.");
+// An empty replacement is valid: it removes the matched text.
+const replacementTextSchema = contentSchema;
+const fileSearchQuerySchema = z
+    .string()
+    .trim()
+    .min(1, "File search query is required.")
+    .max(500, "File search query is too long.");
+const recoveryIdSchema = z
+    .string()
+    .trim()
+    .uuid("A valid NEXA recovery ID is required.");
+/*
+==========================================
 GMAIL RECIPIENT VALIDATION
 ==========================================
 */
@@ -41,17 +62,10 @@ const gmailRecipientsSchema = z
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean);
-    if (recipients.length <
-        1 ||
-        recipients.length >
-            20) {
+    if (recipients.length < 1 || recipients.length > 20) {
         return false;
     }
-    return recipients.every((email) => z
-        .string()
-        .email()
-        .safeParse(email)
-        .success);
+    return recipients.every((email) => z.string().email().safeParse(email).success);
 }, {
     message: "Provide 1 to 20 valid recipient email addresses separated by commas.",
 });
@@ -66,10 +80,7 @@ const gmailSubjectSchema = z
 const gmailBodySchema = z
     .string()
     .max(200_000, "Email body is too large.")
-    .refine((value) => value
-    .trim()
-    .length >
-    0, {
+    .refine((value) => value.trim().length > 0, {
     message: "Email body cannot be empty.",
 });
 /*
@@ -80,7 +91,7 @@ TOOL SCHEMAS
 const toolSchemas = {
     /*
     ========================================
-    FILE
+    FILE — EXISTING TOOLS (UNCHANGED)
     ========================================
     */
     file_create_folder: z.object({
@@ -88,8 +99,7 @@ const toolSchemas = {
     }),
     file_create_file: z.object({
         path: pathSchema,
-        content: contentSchema
-            .optional(),
+        content: contentSchema.optional(),
     }),
     file_read_file: z.object({
         path: pathSchema,
@@ -120,7 +130,36 @@ const toolSchemas = {
     }),
     /*
     ========================================
-    TERMINAL
+    FILE — NEW EXTENDED TOOLS
+    Match NativeToolDefinitions_Updated.ts
+    and FileTool_Updated.ts exactly.
+    ========================================
+    */
+    file_edit_file: z.object({
+        path: pathSchema,
+        search: exactSearchTextSchema,
+        replacement: replacementTextSchema,
+        replaceAll: z.boolean().optional(),
+    }),
+    file_search: z.object({
+        path: pathSchema,
+        query: fileSearchQuerySchema,
+        maxResults: limitSchema,
+    }),
+    file_copy_file: z.object({
+        oldPath: pathSchema,
+        newPath: pathSchema,
+    }),
+    file_copy_folder: z.object({
+        oldPath: pathSchema,
+        newPath: pathSchema,
+    }),
+    file_restore: z.object({
+        recoveryId: recoveryIdSchema,
+    }),
+    /*
+    ========================================
+    TERMINAL — UNCHANGED
     ========================================
     */
     terminal_run: z.object({
@@ -129,7 +168,7 @@ const toolSchemas = {
     }),
     /*
     ========================================
-    MEMORY
+    MEMORY — UNCHANGED
     ========================================
     */
     memory_remember: z.object({
@@ -151,14 +190,11 @@ const toolSchemas = {
         limit: limitSchema,
     }),
     memory_forget: z.object({
-        id: z
-            .number()
-            .int()
-            .positive(),
+        id: z.number().int().positive(),
     }),
     /*
     ========================================
-    GMAIL
+    GMAIL — UNCHANGED
     ========================================
     */
     gmail_recent: z.object({
@@ -180,13 +216,7 @@ const toolSchemas = {
             .max(500, "Gmail message ID is too long."),
     }),
     gmail_send: z.object({
-        /*
-        One string is deliberately used.
-  
-        Example:
-  
-        user1@gmail.com, user2@gmail.com
-        */
+        // Multiple email addresses remain one comma-separated string.
         to: gmailRecipientsSchema,
         subject: gmailSubjectSchema,
         body: gmailBodySchema,
@@ -200,12 +230,10 @@ FORMAT ZOD ERROR
 function formatValidationError(error) {
     return error.issues
         .map((issue) => {
-        const path = issue.path.length >
-            0
+        const field = issue.path.length > 0
             ? issue.path.join(".")
             : "arguments";
-        return (`${path}: ` +
-            issue.message);
+        return `${field}: ${issue.message}`;
     })
         .join("; ");
 }
@@ -222,18 +250,11 @@ export function validateNativeToolCall(toolName, rawArgs) {
             message: `Unknown native tool: ${toolName}`,
         };
     }
-    /*
-    Ollama normally gives us an object.
-  
-    This fallback also safely supports
-    JSON-string arguments if needed.
-    */
+    // Ollama normally supplies an object. Also accept JSON-string arguments.
     let candidate = rawArgs;
-    if (typeof candidate ===
-        "string") {
+    if (typeof candidate === "string") {
         try {
-            candidate =
-                JSON.parse(candidate);
+            candidate = JSON.parse(candidate);
         }
         catch {
             return {

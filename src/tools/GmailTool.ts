@@ -1,861 +1,327 @@
-import {
-  google,
-} from "googleapis";
+import { google, type gmail_v1 } from "googleapis";
+import type { Tool, ToolResult } from "./Tool.js";
+import { getGmailAuth } from "../gmail/GmailAuth.js";
 
-import type {
-  Tool,
-  ToolResult,
-} from "./Tool.js";
-
-import {
-  getGmailAuth,
-} from "../gmail/GmailAuth.js";
-
-
-export class GmailTool
-  implements Tool {
+/**
+ * NEXA Gmail tool.
+ *
+ * All real Gmail access uses the OAuth client from GmailAuth.
+ * Executor and PermissionManager must authorize gmail.send before
+ * execute("send", ...) is called. Do not expose send() to an
+ * untrusted renderer or call it outside the approved tool pipeline.
+ */
+export class GmailTool implements Tool {
   name = "gmail";
 
-
-  /*
-  ==========================================
-  GET GMAIL CLIENT
-  ==========================================
-  */
-
   private async getClient() {
-    const auth =
-      await getGmailAuth();
-
-    return google.gmail({
-      version: "v1",
-      auth,
-    });
+    const auth = await getGmailAuth();
+    return google.gmail({ version: "v1", auth });
   }
 
-
-  /*
-  ==========================================
-  GET EMAIL HEADER
-  ==========================================
-  */
-
   private getHeader(
-    headers:
-      | Array<{
-          name?: string | null;
-          value?: string | null;
-        }>
-      | undefined,
+    headers: gmail_v1.Schema$MessagePartHeader[] | null | undefined,
     name: string
   ): string {
     return (
-      headers?.find(
-        (header) =>
-          header.name
-            ?.toLowerCase() ===
-          name.toLowerCase()
-      )?.value ??
-      ""
+      headers?.find((header) =>
+        header.name?.toLowerCase() === name.toLowerCase()
+      )?.value ?? ""
     );
   }
 
-
-  /*
-  ==========================================
-  DECODE BASE64URL
-  ==========================================
-  */
-
-  private decodeBase64Url(
-    value: string
-  ): string {
-    try {
-      const normalized =
-        value
-          .replace(/-/g, "+")
-          .replace(/_/g, "/");
-
-      return Buffer
-        .from(
-          normalized,
-          "base64"
-        )
-        .toString(
-          "utf8"
-        );
-    } catch {
-      return "";
-    }
+  private decodeBase64Url(value: string): string {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    return Buffer.from(normalized, "base64").toString("utf8");
   }
 
-
-  /*
-  ==========================================
-  ENCODE BASE64URL
-  ==========================================
-
-  Gmail expects the complete MIME email
-  encoded as URL-safe base64.
-  ==========================================
-  */
-
-  private encodeBase64Url(
-    value: string
-  ): string {
-    return Buffer
-      .from(
-        value,
-        "utf8"
-      )
-      .toString(
-        "base64"
-      )
+  private encodeBase64Url(value: string): string {
+    return Buffer.from(value, "utf8")
+      .toString("base64")
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/g, "");
   }
 
-
-  /*
-  ==========================================
-  ENCODE EMAIL SUBJECT
-  ==========================================
-
-  Allows UTF-8 subjects safely.
-  ==========================================
-  */
-
-  private encodeSubject(
-    subject: string
-  ): string {
-    const encoded =
-      Buffer
-        .from(
-          subject,
-          "utf8"
-        )
-        .toString(
-          "base64"
-        );
-
-    return (
-      `=?UTF-8?B?${encoded}?=`
-    );
-  }
-
-
-  /*
-  ==========================================
-  HEADER INJECTION PROTECTION
-  ==========================================
-
-  Email headers must never contain
-  CR/LF supplied by the model/user.
-  ==========================================
-  */
-
-  private assertSafeHeader(
-    value: string,
-    fieldName: string
-  ): void {
-    if (
-      /[\r\n]/.test(
-        value
-      )
-    ) {
-      throw new Error(
-        `${fieldName} contains invalid newline characters.`
-      );
+  private assertSafeHeader(value: string, field: string): void {
+    if (/[\r\n\0]/.test(value)) {
+      throw new Error(`${field} contains an invalid header character.`);
     }
   }
 
+  /** Locate the requested MIME type anywhere in the multipart tree. */
+  private findMimeBody(
+    part: gmail_v1.Schema$MessagePart | null | undefined,
+    mimeType: "text/plain" | "text/html"
+  ): string | null {
+    if (!part) return null;
 
-  /*
-  ==========================================
-  EXTRACT EMAIL BODY
-  ==========================================
-  */
+    // Attachments are not inline message bodies.
+    if (part.filename || part.body?.attachmentId) return null;
 
-  private extractBody(
-    payload: any
-  ): string {
-    if (!payload) {
-      return "";
+    if (part.mimeType?.toLowerCase() === mimeType && part.body?.data) {
+      return this.decodeBase64Url(part.body.data);
     }
 
-
-    /*
-    Plain text body directly.
-    */
-
-    if (
-      payload.mimeType ===
-        "text/plain" &&
-      payload.body?.data
-    ) {
-      return this.decodeBase64Url(
-        payload.body.data
-      );
+    for (const child of part.parts ?? []) {
+      const result = this.findMimeBody(child, mimeType);
+      if (result !== null) return result;
     }
-
-
-    /*
-    Search child MIME parts.
-    */
-
-    if (
-      Array.isArray(
-        payload.parts
-      )
-    ) {
-      /*
-      Prefer text/plain.
-      */
-
-      for (
-        const part
-        of payload.parts
-      ) {
-        if (
-          part.mimeType ===
-            "text/plain" &&
-          part.body?.data
-        ) {
-          return this.decodeBase64Url(
-            part.body.data
-          );
-        }
-      }
-
-
-      /*
-      Search recursively.
-      */
-
-      for (
-        const part
-        of payload.parts
-      ) {
-        const nested =
-          this.extractBody(
-            part
-          );
-
-        if (nested) {
-          return nested;
-        }
-      }
-    }
-
-
-    /*
-    HTML fallback.
-    */
-
-    if (
-      payload.mimeType ===
-        "text/html" &&
-      payload.body?.data
-    ) {
-      return this.decodeBase64Url(
-        payload.body.data
-      );
-    }
-
-
-    return "";
+    return null;
   }
 
+  /** Convert an HTML-only email to plain display text (not rendered HTML). */
+  private htmlToText(html: string): string {
+    return html
+      .replace(/<(script|style|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(/<\/(p|div|tr|li|h[1-6])\s*>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;|&#39;/gi, "'")
+      .replace(/&amp;/gi, "&")
+      .replace(/&#(\d+);/g, (_, number: string) => {
+        const point = Number(number);
+        return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+          ? String.fromCodePoint(point)
+          : "";
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => {
+        const point = parseInt(hex, 16);
+        return Number.isInteger(point) && point >= 0 && point <= 0x10ffff
+          ? String.fromCodePoint(point)
+          : "";
+      })
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
 
-  /*
-  ==========================================
-  RECENT EMAILS
-  ==========================================
-  */
+  private getReadableBody(
+    payload: gmail_v1.Schema$MessagePart | null | undefined
+  ): { body: string; bodyFormat: string } {
+    const plain = this.findMimeBody(payload, "text/plain");
+    if (plain !== null) return { body: plain, bodyFormat: "text/plain" };
 
-  async recent(
-    limit = 5
-  ): Promise<ToolResult> {
-    const gmail =
-      await this.getClient();
+    const html = this.findMimeBody(payload, "text/html");
+    if (html !== null) {
+      return {
+        body: this.htmlToText(html),
+        bodyFormat: "text/html converted to text",
+      };
+    }
 
+    return { body: "", bodyFormat: "unavailable" };
+  }
 
-    const response =
-      await gmail.users
-        .messages.list({
-          userId: "me",
+  private validLimit(value: number, fallback: number): number {
+    if (!Number.isFinite(value) || !Number.isInteger(value)) {
+      throw new Error("Email limit must be an integer.");
+    }
+    if (value < 1 || value > 25) {
+      throw new Error("Email limit must be between 1 and 25.");
+    }
+    return value || fallback;
+  }
 
-          maxResults:
-            limit,
+  /** Fetch actual message metadata for results, not invented summaries. */
+  private async getMessageSummaries(
+    gmail: gmail_v1.Gmail,
+    items: gmail_v1.Schema$Message[]
+  ): Promise<Array<Record<string, unknown>>> {
+    const emails: Array<Record<string, unknown>> = [];
 
-          q:
-            "in:inbox",
-        });
-
-
-    const messages =
-      response.data.messages ??
-      [];
-
-
-    const emails: Array<
-      Record<string, unknown>
-    > = [];
-
-
-    for (
-      const message
-      of messages
-    ) {
-      if (!message.id) {
-        continue;
-      }
-
-
-      const details =
-        await gmail.users
-          .messages.get({
-            userId: "me",
-
-            id:
-              message.id,
-
-            format:
-              "metadata",
-
-            metadataHeaders: [
-              "From",
-              "To",
-              "Subject",
-              "Date",
-            ],
-          });
-
-
-      const headers =
-        details.data.payload
-          ?.headers;
-
-
+    for (const item of items) {
+      if (!item.id) continue;
+      const detail = await gmail.users.messages.get({
+        userId: "me",
+        id: item.id,
+        format: "metadata",
+        metadataHeaders: ["From", "To", "Subject", "Date"],
+      });
+      const data = detail.data;
+      const headers = data.payload?.headers;
       emails.push({
-        id:
-          message.id,
-
-        threadId:
-          details.data.threadId,
-
-        from:
-          this.getHeader(
-            headers,
-            "From"
-          ),
-
-        to:
-          this.getHeader(
-            headers,
-            "To"
-          ),
-
-        subject:
-          this.getHeader(
-            headers,
-            "Subject"
-          ),
-
-        date:
-          this.getHeader(
-            headers,
-            "Date"
-          ),
-
-        snippet:
-          details.data.snippet ??
-          "",
+        id: data.id ?? item.id,
+        threadId: data.threadId ?? "",
+        from: this.getHeader(headers, "From"),
+        to: this.getHeader(headers, "To"),
+        subject: this.getHeader(headers, "Subject"),
+        date: this.getHeader(headers, "Date"),
+        snippet: data.snippet ?? "",
       });
     }
+    return emails;
+  }
 
-
+  async recent(limit = 5): Promise<ToolResult> {
+    const gmail = await this.getClient();
+    const count = this.validLimit(limit, 5);
+    const response = await gmail.users.messages.list({
+      userId: "me",
+      q: "in:inbox",
+      maxResults: count,
+    });
+    const emails = await this.getMessageSummaries(gmail, response.data.messages ?? []);
     return {
       success: true,
-
-      message:
-        `Found ${emails.length} recent emails.`,
-
-      data: {
-        emails,
-      },
+      message: `Found ${emails.length} recent inbox emails.`,
+      data: { emails },
     };
   }
 
-
-  /*
-  ==========================================
-  SEARCH EMAILS
-  ==========================================
-  */
-
-  async search(
-    query: string,
-    limit = 10
-  ): Promise<ToolResult> {
-    const gmail =
-      await this.getClient();
-
-
-    const response =
-      await gmail.users
-        .messages.list({
-          userId: "me",
-
-          q:
-            query,
-
-          maxResults:
-            limit,
-        });
-
-
-    const messages =
-      response.data.messages ??
-      [];
-
-
-    const emails: Array<
-      Record<string, unknown>
-    > = [];
-
-
-    for (
-      const message
-      of messages
-    ) {
-      if (!message.id) {
-        continue;
-      }
-
-
-      const details =
-        await gmail.users
-          .messages.get({
-            userId: "me",
-
-            id:
-              message.id,
-
-            format:
-              "metadata",
-
-            metadataHeaders: [
-              "From",
-              "To",
-              "Subject",
-              "Date",
-            ],
-          });
-
-
-      const headers =
-        details.data.payload
-          ?.headers;
-
-
-      emails.push({
-        id:
-          message.id,
-
-        threadId:
-          details.data.threadId,
-
-        from:
-          this.getHeader(
-            headers,
-            "From"
-          ),
-
-        to:
-          this.getHeader(
-            headers,
-            "To"
-          ),
-
-        subject:
-          this.getHeader(
-            headers,
-            "Subject"
-          ),
-
-        date:
-          this.getHeader(
-            headers,
-            "Date"
-          ),
-
-        snippet:
-          details.data.snippet ??
-          "",
-      });
+  async search(query: string, limit = 10): Promise<ToolResult> {
+    const term = query.trim();
+    if (!term || term.length > 2048) {
+      return { success: false, message: "A valid Gmail search query is required." };
     }
 
-
+    const gmail = await this.getClient();
+    const count = this.validLimit(limit, 10);
+    const response = await gmail.users.messages.list({
+      userId: "me",
+      q: term,
+      maxResults: count,
+    });
+    const emails = await this.getMessageSummaries(gmail, response.data.messages ?? []);
     return {
       success: true,
-
-      message:
-        `Found ${emails.length} matching emails.`,
-
-      data: {
-        query,
-        emails,
-      },
+      message: `Found ${emails.length} matching emails.`,
+      data: { query: term, emails },
     };
   }
 
+  async read(id: string): Promise<ToolResult> {
+    const messageId = id.trim();
+    if (!messageId || /\s/.test(messageId) || messageId.length > 256) {
+      return { success: false, message: "A valid Gmail message ID is required." };
+    }
 
-  /*
-  ==========================================
-  READ ONE EMAIL
-  ==========================================
-  */
-
-  async read(
-    id: string
-  ): Promise<ToolResult> {
-    const gmail =
-      await this.getClient();
-
-
-    const response =
-      await gmail.users
-        .messages.get({
-          userId: "me",
-
-          id,
-
-          format:
-            "full",
-        });
-
-
-    const headers =
-      response.data.payload
-        ?.headers;
-
-
-    const body =
-      this.extractBody(
-        response.data.payload
-      );
-
+    const gmail = await this.getClient();
+    const response = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+    const message = response.data;
+    const headers = message.payload?.headers;
+    const { body, bodyFormat } = this.getReadableBody(message.payload);
 
     return {
       success: true,
-
-      message:
-        "Email read successfully.",
-
+      message: body
+        ? "Email read successfully."
+        : "Email metadata retrieved, but no inline readable body was available.",
       data: {
-        id:
-          response.data.id,
-
-        threadId:
-          response.data.threadId,
-
-        from:
-          this.getHeader(
-            headers,
-            "From"
-          ),
-
-        to:
-          this.getHeader(
-            headers,
-            "To"
-          ),
-
-        subject:
-          this.getHeader(
-            headers,
-            "Subject"
-          ),
-
-        date:
-          this.getHeader(
-            headers,
-            "Date"
-          ),
-
-        snippet:
-          response.data.snippet ??
-          "",
-
+        id: message.id ?? messageId,
+        threadId: message.threadId ?? "",
+        from: this.getHeader(headers, "From"),
+        to: this.getHeader(headers, "To"),
+        subject: this.getHeader(headers, "Subject"),
+        date: this.getHeader(headers, "Date"),
+        snippet: message.snippet ?? "",
         body,
+        bodyFormat,
       },
     };
   }
 
+  /**
+   * Actual Gmail send: the Executor/PermissionManager must approve FIRST.
+   * Only supports comma-separated plain email addresses (not display names).
+   */
+  async send(to: string, subject: string, body: string): Promise<ToolResult> {
+    const recipientText = to.trim();
+    const cleanSubject = subject.trim();
 
-  /*
-  ==========================================
-  SEND EMAIL
-  ==========================================
+    this.assertSafeHeader(recipientText, "Recipient");
+    this.assertSafeHeader(cleanSubject, "Subject");
 
-  IMPORTANT:
-
-  This method performs the REAL Gmail send.
-
-  PermissionManager will later ensure that
-  this action always requires explicit user
-  approval before Executor reaches here.
-  ==========================================
-  */
-
-  async send(
-    to: string,
-    subject: string,
-    body: string
-  ): Promise<ToolResult> {
-    /*
-    ========================================
-    BASIC DEFENSE-IN-DEPTH VALIDATION
-    ========================================
-    */
-
-    const cleanTo =
-      to.trim();
-
-    const cleanSubject =
-      subject.trim();
-
-    const cleanBody =
-      body;
-
-
-    if (!cleanTo) {
+    const recipients = recipientText.split(",").map((item) => item.trim());
+    const addressPattern = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+    if (
+      recipients.length < 1 ||
+      recipients.length > 20 ||
+      recipients.some((item) => !addressPattern.test(item))
+    ) {
       return {
         success: false,
-
-        message:
-          "Email recipient is required.",
+        message: "Provide 1–20 valid recipient email addresses, separated by commas.",
       };
     }
-
-
-    if (!cleanSubject) {
-      return {
-        success: false,
-
-        message:
-          "Email subject is required.",
-      };
+    if (!cleanSubject || !body.trim()) {
+      return { success: false, message: "Email subject and body are required." };
     }
 
+    const normalizedBody = body.replace(/\r\n?|\n/g, "\r\n");
+    const bodyBase64 = Buffer.from(normalizedBody, "utf8")
+      .toString("base64")
+      .match(/.{1,76}/g)
+      ?.join("\r\n") ?? "";
+    const subjectBase64 = Buffer.from(cleanSubject, "utf8").toString("base64");
 
-    if (!cleanBody.trim()) {
-      return {
-        success: false,
-
-        message:
-          "Email body is required.",
-      };
-    }
-
-
-    /*
-    Protect MIME headers from newline
-    injection.
-
-    Body is allowed to contain newlines.
-    */
-
-    this.assertSafeHeader(
-      cleanTo,
-      "Email recipient"
-    );
-
-    this.assertSafeHeader(
-      cleanSubject,
-      "Email subject"
-    );
-
-
-    const gmail =
-      await this.getClient();
-
-
-    /*
-    ========================================
-    BUILD RFC 2822 / MIME EMAIL
-    ========================================
-    */
-
-    const rawMessage = [
-      `To: ${cleanTo}`,
-
-      `Subject: ${this.encodeSubject(
-        cleanSubject
-      )}`,
-
+    const mime = [
+      `To: ${recipients.join(", ")}`,
+      `Subject: =?UTF-8?B?${subjectBase64}?=`,
       "MIME-Version: 1.0",
-
       'Content-Type: text/plain; charset="UTF-8"',
-
-      "Content-Transfer-Encoding: 8bit",
-
+      "Content-Transfer-Encoding: base64",
       "",
+      bodyBase64,
+    ].join("\r\n");
 
-      cleanBody,
-    ].join(
-      "\r\n"
-    );
-
-
-    /*
-    Gmail requires URL-safe base64.
-    */
-
-    const raw =
-      this.encodeBase64Url(
-        rawMessage
-      );
-
-
-    /*
-    ========================================
-    REAL GMAIL SEND
-    ========================================
-    */
-
-    const response =
-      await gmail.users
-        .messages.send({
-          userId: "me",
-
-          requestBody: {
-            raw,
-          },
-        });
-
+    const gmail = await this.getClient();
+    const response = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw: this.encodeBase64Url(mime) },
+    });
 
     return {
       success: true,
-
-      message:
-        "Email sent successfully.",
-
+      message: "Email sent successfully.",
       data: {
-        id:
-          response.data.id,
-
-        threadId:
-          response.data.threadId,
-
-        labelIds:
-          response.data.labelIds ??
-          [],
-
-        to:
-          cleanTo,
-
-        subject:
-          cleanSubject,
+        id: response.data.id ?? "",
+        threadId: response.data.threadId ?? "",
+        labelIds: response.data.labelIds ?? [],
+        to: recipients.join(", "),
+        subject: cleanSubject,
       },
     };
   }
-
-
-  /*
-  ==========================================
-  EXECUTE
-  ==========================================
-  */
 
   async execute(
     action: string,
-    parameters:
-      Record<
-        string,
-        unknown
-      >
+    parameters: Record<string, unknown>
   ): Promise<ToolResult> {
     try {
       switch (action) {
         case "recent":
           return await this.recent(
-            parameters.limit
-              ? Number(
-                  parameters.limit
-                )
-              : 5
+            parameters.limit === undefined ? 5 : Number(parameters.limit)
           );
-
-
         case "search":
           return await this.search(
-            String(
-              parameters.query ??
-              ""
-            ),
-
-            parameters.limit
-              ? Number(
-                  parameters.limit
-                )
-              : 10
+            String(parameters.query ?? ""),
+            parameters.limit === undefined ? 10 : Number(parameters.limit)
           );
-
-
         case "read":
-          return await this.read(
-            String(
-              parameters.id ??
-              ""
-            )
-          );
-
-
-        /*
-        ======================================
-        SEND EMAIL
-        ======================================
-        */
-
+          return await this.read(String(parameters.id ?? ""));
         case "send":
           return await this.send(
-            String(
-              parameters.to ??
-              ""
-            ),
-
-            String(
-              parameters.subject ??
-              ""
-            ),
-
-            String(
-              parameters.body ??
-              ""
-            )
+            String(parameters.to ?? ""),
+            String(parameters.subject ?? ""),
+            String(parameters.body ?? "")
           );
-
-
         default:
-          return {
-            success: false,
-
-            message:
-              `Unknown GmailTool action: ${action}`,
-          };
+          return { success: false, message: `Unknown Gmail action: ${action}` };
       }
     } catch (error) {
-      return {
-        success: false,
-
-        message:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
+      // Never include token contents in logs or returned errors.
+      const detail = error instanceof Error ? error.message : String(error);
+      return { success: false, message: `Gmail operation failed: ${detail}` };
     }
   }
 }

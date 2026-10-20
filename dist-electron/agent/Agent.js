@@ -1,3 +1,10 @@
+import ollama from "ollama";
+import nodePath from "node:path";
+import { Planner } from "./Planner.js";
+import { PendingFileConfirmation } from "./PendingFileConfirmation.js";
+import { validatePlan } from "./PlanValidator.js";
+import { TaskContext } from "./TaskContext.js";
+import { TaskRunner } from "./TaskRunner.js";
 import { askOllama } from "../ollama/OllamaClient.js";
 import { FileTool } from "../tools/FileTool.js";
 import { TerminalTool } from "../tools/TerminalTool.js";
@@ -10,9 +17,7 @@ import { MemoryTool } from "../tools/MemoryTool.js";
 import { MemoryManager } from "../memory/MemoryManager.js";
 import { GmailTool } from "../tools/GmailTool.js";
 import { Executor } from "./Executor.js";
-import { resolveFastFileCommand } from "./FileFastPath.js";
-import { resolveMultiStepFileCommand } from "./FileMultiStepFastPath.js";
-import { formatFileResult } from "./FileResultFormatter.js";
+import { ResultInterpreter } from "./ResultInterpreter.js";
 import { detectToolRequirement, } from "./ToolRequirementDetector.js";
 import { detectBrowserRequirement } from "./BrowserRequirementDetector.js";
 import { GmailComposeManager, } from "./GmailComposeManager.js";
@@ -20,6 +25,20 @@ import { getCapabilityResponse, } from "./CapabilityResponder.js";
 import { summarizeBrowserPage, } from "../browser/BrowserSummarizer.js";
 export class Agent {
     executor;
+    // These roots are authorized for file discovery, but results still must be
+    // grounded by a real tool response before later operations use their paths.
+    fileDiscoveryRoots = ["S:\\"];
+    aiPlanner = new Planner();
+    resultInterpreter = new ResultInterpreter();
+    aiTaskContext = new TaskContext();
+    pendingFileConfirmation = new PendingFileConfirmation();
+    // Planner clarifications are separate from validated-plan path approvals.
+    // Preserve their original request instead of treating "yes" as a new task.
+    pendingPlannerClarification = null;
+    plannerClarificationLifetimeMs = 15 * 60 * 1000;
+    // Expose every registered native file action to the AI planner.
+    // This is a TOOL policy, not natural-language sentence matching.
+    aiFileTools = allAgentTools.filter((tool) => tool.function?.name?.startsWith("file_") === true);
     messages;
     memoryManager;
     gmailComposeManager;
@@ -78,11 +97,11 @@ export class Agent {
         */
         const fileTool = new FileTool([
             process.cwd(),
-            "S:\\\\",
+            ...this.fileDiscoveryRoots,
         ]);
         const terminalTool = new TerminalTool([
             process.cwd(),
-            "S:\\\\",
+            ...this.fileDiscoveryRoots,
         ]);
         const memoryTool = new MemoryTool(this.memoryManager);
         const gmailTool = new GmailTool();
@@ -311,7 +330,7 @@ export class Agent {
     
         Remove tracking-style links:
     
-        <https\\\\://very-long-link>Google
+        <https\\\\\\\\\\\\\\\\://very-long-link>Google
     
         becomes:
     
@@ -530,9 +549,13 @@ export class Agent {
   
     */
     /**
+  
      * Conservative browser fast path. Only commands with an unambiguous intent
+  
      * are handled without an LLM; all others fall through to the agent loop.
+  
      * The existing Validator -> Executor -> PermissionManager is ALWAYS used.
+  
      */
     async tryFastBrowserCommand(userInput) {
         const input = userInput.trim();
@@ -634,9 +657,13 @@ export class Agent {
         return this.generatedFinalAnswer(answer);
     }
     /**
+  
      * Fast, read-only Gmail actions. Ambiguous requests fall back to Ollama.
+  
      * All API calls still pass through validation, Executor and permissions.
+  
      * Never send or draft email from this path.
+  
      */
     async tryFastGmailCommand(userInput) {
         const input = userInput.trim();
@@ -727,130 +754,450 @@ export class Agent {
             console.log(`[GmailFastPath] Completed in ${((performance.now() - started) / 1000).toFixed(2)}s`);
         }
     }
-    /** Handle safe file commands directly using the existing validation and permissions. */
-    /**
-     * Optimized folder + file creation.
-     *
-     * Uses the existing validator, executor,
-     * permission manager, and FileTool.
-     *
-     * Never calls Ollama for recognized requests.
+    /** AI reasoning is separate from executable tool permissions.
+  
+     * There are no patterns for interpreting users' sentences here.
+  
+     * Absolute paths must originate in the current user's request or
+  
+     * from a previously verified tool result.
+  
      */
-    async tryFastMultiStepFileCommand(userInput) {
-        const resolution = resolveMultiStepFileCommand(userInput);
-        if (resolution.status === "unmatched") {
-            return null;
-        }
-        if (resolution.status === "clarify") {
-            return this.generatedPrivateFinalAnswer(resolution.message);
-        }
-        const { folderPath, filePath, content } = resolution.plan;
-        const started = performance.now();
-        console.log("[FileMultiStep] folder + file", {
-            folderPath,
-            filePath,
-        });
-        /**
-         * Execute through existing security pipeline.
-         * Never invoke FileTool directly.
-         */
-        const executeFile = async (toolName, args) => {
-            const validation = validateAgentToolCall(toolName, args);
-            if (!validation.success) {
-                return {
-                    success: false,
-                    message: String(validation.message),
-                };
-            }
-            const request = mapAgentToolCall(toolName, validation.args);
-            if (!request || request.tool !== "file") {
-                return {
-                    success: false,
-                    message: "File tool mapping unavailable.",
-                };
-            }
-            return this.executor.execute(request);
-        };
-        /**
-         * Check both destinations before writing.
-         *
-         * Avoid overwriting an existing file
-         * or modifying an existing folder.
-         */
-        for (const target of [filePath, folderPath]) {
-            const result = await executeFile("file_exists", { path: target });
-            if (!result.success) {
-                return this.generatedPrivateFinalAnswer(`Could not safely check ${target}: ` +
-                    String(result.message ?? "Unknown error"));
-            }
-            const data = result.data;
-            if (!data ||
-                typeof data !== "object" ||
-                typeof data.exists !==
-                    "boolean") {
-                return this.generatedPrivateFinalAnswer("File existence check returned an unexpected result. Nothing was created.");
-            }
-            const exists = data.exists;
-            if (exists && target === filePath) {
-                return this.generatedPrivateFinalAnswer(`File already exists: ${filePath}\n` +
-                    "Nothing was overwritten.");
-            }
-            if (exists && target === folderPath) {
-                return this.generatedPrivateFinalAnswer(`Folder already exists: ${folderPath}\n` +
-                    "No files were created inside the existing folder.");
-            }
-        }
-        /**
-         * Step 1 — Create folder
-         */
-        const folderResult = await executeFile("file_create_folder", { path: folderPath });
-        if (!folderResult.success) {
-            return this.generatedPrivateFinalAnswer(`Folder creation failed: ${String(folderResult.message ?? "Unknown error")}\nFile was not created.`);
-        }
-        /**
-         * Step 2 — Create file with exact content
-         */
-        const fileResult = await executeFile("file_create_file", {
-            path: filePath,
-            content,
-        });
-        if (!fileResult.success) {
-            return this.generatedPrivateFinalAnswer(`Folder created: ${folderPath}\n` +
-                `File creation failed: ${String(fileResult.message ?? "Unknown error")}\n` +
-                "The folder was left in place.");
-        }
-        console.log(`[FileMultiStep] Completed in ${((performance.now() - started) /
-            1000).toFixed(2)}s`);
-        return this.generatedPrivateFinalAnswer(`Folder created: ${folderPath}\n` +
-            `File created: ${filePath}\n` +
-            `Content: ${content}`);
+    /**
+     * Detect a model-SUGGESTED absolute Windows path, not a user command.
+     * It is never treated as an existing path until FileTool verifies it.
+     */
+    suggestedWindowsPaths(text) {
+        const candidates = text.match(/\b[A-Za-z]:\\[^\s\r\n<>|"']+/g) ?? [];
+        return candidates
+            .map((candidate) => candidate.replace(/[.,;!?)}\]]+$/, ""))
+            .filter((candidate) => nodePath.win32.isAbsolute(candidate));
     }
-    async tryFastFileCommand(userInput) {
-        const resolved = resolveFastFileCommand(userInput);
-        if (resolved.status === "unmatched")
+    /**
+     * Only a read-only search may be derived from an AI path guess. The file or
+     * folder name must already appear in the user's request, and the search root
+     * must be an explicitly configured discovery root. This never executes an
+     * invented path and never generates a mutating action.
+     */
+    async tryGroundedDiscoveryFromClarification(originalInstruction, clarification) {
+        const canonical = (path) => nodePath.win32.normalize(path).toLowerCase();
+        const candidates = this.suggestedWindowsPaths(clarification);
+        if (candidates.length !== 1)
             return null;
-        if (resolved.status === "ambiguous") {
-            return this.generatedPrivateFinalAnswer(resolved.message);
+        const proposed = candidates[0];
+        const query = nodePath.win32.basename(proposed);
+        const root = nodePath.win32.parse(proposed).root;
+        if (!query || query === "." || query === "..")
+            return null;
+        if (originalInstruction.toLowerCase().includes(proposed.toLowerCase()))
+            return null;
+        if (!originalInstruction.toLowerCase().includes(query.toLowerCase()))
+            return null;
+        if (!this.fileDiscoveryRoots.some((allowed) => canonical(allowed) === canonical(root))) {
+            return null;
         }
-        const command = resolved.command;
-        const started = performance.now();
-        console.log(`[FileFastPath] ${command.toolName}`, command.args);
-        const validation = validateAgentToolCall(command.toolName, command.args);
-        if (!validation.success) {
-            return this.generatedPrivateFinalAnswer(`File command rejected: ${validation.message}`);
+        // This is a generic *verification* of a planner-suggested location, not
+        // natural-language intent matching. Exact path usage still requires a real
+        // search result and a separate AI-selected read-only follow-up.
+        const discoveryPlan = {
+            kind: "plan",
+            goal: originalInstruction,
+            steps: [{
+                    id: "step1",
+                    toolName: "file_search",
+                    arguments: { path: root, query, maxResults: 20 },
+                    dependsOn: [],
+                }],
+        };
+        const validation = validatePlan(discoveryPlan, this.aiFileTools);
+        if (!validation.valid) {
+            console.warn("[NEXA Discovery] Search rejected:", validation.message);
+            return null;
         }
-        const request = mapAgentToolCall(command.toolName, validation.args);
-        if (!request || request.tool !== "file") {
-            return this.generatedPrivateFinalAnswer("File command mapping is unavailable.");
+        console.log("[NEXA Discovery] Verifying a suggested location by read-only search.");
+        return this.executeAIFilePlan(discoveryPlan, originalInstruction);
+    }
+    /** Classify a follow-up without interpreting free-form text as authorization. */
+    async classifyPlannerClarificationReply(originalInstruction, question, reply) {
+        const model = process.env.OLLAMA_CONFIRMATION_MODEL?.trim() ||
+            process.env.OLLAMA_PLANNER_MODEL?.trim() ||
+            process.env.OLLAMA_AGENT_MODEL?.trim() ||
+            "qwen3:8b";
+        const result = await ollama.chat({
+            model,
+            messages: [
+                {
+                    role: "system",
+                    content: [
+                        "Classify the user's answer to NEXA's pending clarification.",
+                        'Reply with JSON only: {"decision":"confirm|cancel|change|unclear"}.',
+                        "Confirm only for unambiguous acceptance of the question as stated.",
+                        "Cancel for rejection or cancellation.",
+                        "Change if the user proposes different paths, instructions, or a new task.",
+                        "Unclear if ambiguous or unrelated.",
+                        "You do not execute actions or grant permission to modify data.",
+                    ].join("\n"),
+                },
+                {
+                    role: "user",
+                    content: JSON.stringify({ originalInstruction, question, reply }),
+                },
+            ],
+            format: "json",
+            stream: false,
+            think: false,
+            keep_alive: "20m",
+            options: { temperature: 0, num_predict: 80, num_ctx: 2048 },
+        });
+        const parsed = JSON.parse(result.message.content || "");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            return "unclear";
+        const value = parsed.decision;
+        return value === "confirm" || value === "cancel" ||
+            value === "change" || value === "unclear" ? value : "unclear";
+    }
+    async tryAIFilePlan(userInput, confirmedQuestion) {
+        const decision = await this.aiPlanner.plan({
+            instruction: userInput,
+            history: this.messages.slice(0, -1).filter((message) => message.role === "user" || message.role === "assistant"),
+            tools: this.aiFileTools,
+            taskContext: [
+                this.aiTaskContext.getContextForPlanner(),
+                "Trusted discovery roots for file_search: " + this.fileDiscoveryRoots.join(", "),
+                "A folder mentioned only by name can be discovered within an authorized root. " +
+                    "Search results become trusted paths only after a tool verifies them. " +
+                    "Normal path confirmation, permission checks and preflight still apply.",
+            ].join("\n"),
+        });
+        if (decision.kind === "error") {
+            console.error("[NEXA File Planner]", decision.message);
+            return `AI planning failed: ${decision.message}\nNo file operation was performed.`;
         }
-        // Never call FileTool directly: existing Executor checks permissions.
-        const result = await this.executor.execute(request);
-        console.log(`[FileFastPath] Completed in ${((performance.now() - started) / 1000).toFixed(2)}s`);
-        if (!result.success && this.isPermissionDenied(result)) {
-            return this.generatedPrivateFinalAnswer("Permission denied. The file action was not performed.");
+        // Non-file conversation still uses the original Gmail/Browser/chat flow.
+        if (decision.kind === "response")
+            return null;
+        if (decision.kind === "clarification") {
+            // Models may guess a path and ask the user to confirm it rather than
+            // calling file_search. Do not trust the guess. Prefer verified discovery
+            // of a user-mentioned name within an explicitly authorized search root.
+            const discovered = await this.tryGroundedDiscoveryFromClarification(userInput, decision.question);
+            if (discovered !== null)
+                return discovered;
+            // A clarification already answered by the user must never loop forever.
+            if (confirmedQuestion) {
+                return "The path was confirmed, but the planner still could not choose a valid action. " +
+                    "No further file operation was performed. Please provide the exact operation and path.";
+            }
+            // Save the original request for the next user turn. The TaskContext
+            // prompt alone is not a pending clarification and cannot resume a task.
+            this.pendingPlannerClarification = {
+                originalInstruction: userInput,
+                question: decision.question,
+                startedAt: Date.now(),
+            };
+            return decision.question;
         }
-        // Do not store arbitrary file contents or directory inventories in SQLite memory.
-        return this.generatedPrivateFinalAnswer(formatFileResult(command.toolName, result));
+        // Validate EVERY step and its concrete arguments BEFORE any work begins.
+        // PlanValidator holds the canonical file-tool path policy for all 15 actions.
+        const validation = validatePlan(decision, this.aiFileTools);
+        if (!validation.valid) {
+            return `File plan rejected: ${validation.message}. No file operation was performed.`;
+        }
+        const validatedDecision = {
+            kind: "plan",
+            goal: validation.plan.goal,
+            steps: validation.plan.steps.map((step) => ({
+                id: step.id,
+                toolName: step.toolName,
+                arguments: { ...step.arguments },
+                dependsOn: [...step.dependsOn],
+            })),
+        };
+        // The following is data provenance checking, not natural-language parsing.
+        // Path references must be explicitly supplied, or obtained from earlier
+        // verified tool results, or confirmed before execution.
+        const canonical = (value) => nodePath.win32.normalize(value).toLowerCase();
+        const normalizedInput = userInput.replace(/\//g, "\\").toLowerCase();
+        const verifiedFacts = this.aiTaskContext.getSnapshot().facts.filter((fact) => fact.source === "tool");
+        const verifiedPaths = new Set(verifiedFacts
+            .filter((fact) => nodePath.win32.isAbsolute(fact.value))
+            .map((fact) => canonical(fact.value)));
+        const verifiedRecoveryIds = new Set(verifiedFacts
+            .filter((fact) => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(fact.value))
+            .map((fact) => fact.value.toLowerCase()));
+        const isGrounded = (target, extraParents) => {
+            if (!nodePath.win32.isAbsolute(target))
+                return false;
+            const absolute = canonical(target);
+            if (normalizedInput.includes(absolute) || verifiedPaths.has(absolute))
+                return true;
+            const basename = nodePath.win32.basename(target).toLowerCase();
+            const parent = canonical(nodePath.win32.dirname(target));
+            // A derived child name is acceptable only when both its basename and
+            // its parent are grounded; do not let AI invent filenames or directories.
+            return !!basename && normalizedInput.includes(basename) &&
+                (normalizedInput.includes(parent) ||
+                    verifiedPaths.has(parent) || extraParents.has(parent));
+        };
+        const plannedParents = new Set();
+        let needsPathConfirmation = false;
+        for (const step of validatedDecision.steps) {
+            if (step.toolName === "file_restore") {
+                const id = step.arguments.recoveryId;
+                if (typeof id !== "string" ||
+                    (!normalizedInput.includes(id.toLowerCase()) &&
+                        !verifiedRecoveryIds.has(id.toLowerCase()))) {
+                    return "Please provide the exact recovery ID from a previous NEXA " +
+                        "file operation. No restoration was performed.";
+                }
+                continue;
+            }
+            // PlanValidator already checked required fields; inspect ALL path
+            // arguments, including copy operations and any future file actions.
+            const fields = ["path", "oldPath", "newPath"].filter((field) => Object.prototype.hasOwnProperty.call(step.arguments, field));
+            if (fields.length === 0) {
+                return `File plan rejected: ${step.toolName} has no path policy.`;
+            }
+            const extraParents = new Set(plannedParents);
+            const source = step.arguments.oldPath;
+            if (typeof source === "string" && isGrounded(source, extraParents)) {
+                extraParents.add(canonical(nodePath.win32.dirname(source)));
+            }
+            for (const field of fields) {
+                const target = step.arguments[field];
+                if (typeof target !== "string" || !nodePath.win32.isAbsolute(target)) {
+                    return `Invalid absolute Windows ${field}. No file action was performed.`;
+                }
+                // Authorized discovery roots are grounded for searches only. This
+                // does not authorize file edits or searches of arbitrary directories.
+                const trustedDiscoveryRoot = step.toolName === "file_search" && field === "path" &&
+                    this.fileDiscoveryRoots.some((root) => canonical(root) === canonical(target)) &&
+                    typeof step.arguments.query === "string" &&
+                    step.arguments.query.trim().length > 0 &&
+                    normalizedInput.includes(step.arguments.query.trim().toLowerCase());
+                if (!trustedDiscoveryRoot && !isGrounded(target, extraParents)) {
+                    needsPathConfirmation = true;
+                }
+            }
+            // A folder newly created earlier in this plan may be used as a
+            // destination's parent, subject to the same filename grounding rule.
+            if (step.toolName === "file_create_folder" &&
+                typeof step.arguments.path === "string") {
+                plannedParents.add(canonical(step.arguments.path));
+            }
+        }
+        if (needsPathConfirmation) {
+            // Explicit path confirmation DOES NOT authorize editing or deletion.
+            // Executor -> PermissionManager still separately requests approval.
+            return this.pendingFileConfirmation.set(validatedDecision, userInput);
+        }
+        return this.executeAIFilePlan(validatedDecision, userInput);
+    }
+    /** Execute only a validated file plan, including plans resumed after clarification. */
+    async executeAIFilePlan(decision, userInput, readOnlyFollowUpsRemaining = 1) {
+        const permitted = new Set(this.aiFileTools
+            .map((tool) => tool.function?.name)
+            .filter((name) => typeof name === "string"));
+        const runner = new TaskRunner(this.executor, this.aiTaskContext, this.aiFileTools);
+        const outcome = await runner.run(decision, { allowedToolNames: permitted });
+        // Only trust successful and independently verified tool results.
+        // Recovery IDs enable later undo/restore without guessing identifiers.
+        const canonical = (value) => nodePath.win32.normalize(value).toLowerCase();
+        const destinationTools = new Set([
+            "file_rename", "file_move", "file_copy_file", "file_copy_folder",
+        ]);
+        for (const result of outcome.results) {
+            if (!result.success)
+                continue;
+            const original = decision.steps.find((step) => step.id === result.stepId);
+            if (!original)
+                continue;
+            const data = result.data;
+            if (!data || typeof data !== "object" || Array.isArray(data))
+                continue;
+            const details = data;
+            if (typeof details.recoveryId === "string") {
+                this.aiTaskContext.setFact("lastRecoveryId", details.recoveryId, "tool");
+            }
+            if (result.toolName === "file_delete_file" || result.toolName === "file_delete_folder") {
+                // A deleted path must not be saved as an existing target.
+                continue;
+            }
+            if (result.toolName === "file_exists" && details.exists !== true)
+                continue;
+            if (result.toolName === "file_search") {
+                const matches = details.items;
+                if (Array.isArray(matches) && matches.length === 1) {
+                    const first = matches[0];
+                    if (first && typeof first === "object" && !Array.isArray(first)) {
+                        const hit = first.path;
+                        if (typeof hit === "string" && nodePath.win32.isAbsolute(hit)) {
+                            this.aiTaskContext.setFact("lastVerifiedPath", hit, "tool");
+                        }
+                    }
+                }
+                // Multiple search matches are ambiguous: don't invent a selection.
+            }
+            const candidate = destinationTools.has(result.toolName)
+                ? details.newPath
+                : details.path;
+            const expected = destinationTools.has(result.toolName)
+                ? original.arguments.newPath
+                : original.arguments.path;
+            if (typeof candidate !== "string" || !nodePath.win32.isAbsolute(candidate))
+                continue;
+            if (result.toolName !== "file_restore") {
+                if (typeof expected !== "string" || canonical(candidate) !== canonical(expected))
+                    continue;
+            }
+            this.aiTaskContext.setFact("lastVerifiedPath", candidate, "tool");
+            if (result.toolName === "file_list_files" ||
+                result.toolName === "file_create_folder") {
+                this.aiTaskContext.setFact("currentDirectory", candidate, "tool");
+            }
+        }
+        // Continue a discovery request when the user also asked for information
+        // about the discovered item. The AI chooses the next read-only tool;
+        // code never matches user sentences or special folder names.
+        //
+        // This runs AFTER the first validated tool has completed and its verified
+        // result has been stored in TaskContext. It also runs after a user confirms
+        // a search path, because that flow calls executeAIFilePlan directly.
+        // Never infer a destination, mutate files, or bypass TaskRunner permissions.
+        if (readOnlyFollowUpsRemaining > 0 &&
+            outcome.success &&
+            decision.steps.length === 1 &&
+            decision.steps[0].toolName === "file_search") {
+            const completedSearch = outcome.results.find((result) => result.success && result.toolName === "file_search");
+            const searchData = completedSearch?.data;
+            if (searchData &&
+                typeof searchData === "object" &&
+                !Array.isArray(searchData)) {
+                const searchDetails = searchData;
+                const items = searchDetails.items;
+                // A single verified match can safely be inspected. Multiple matches
+                // remain ambiguous, so the original search results are returned.
+                if (Array.isArray(items) && items.length === 1) {
+                    const firstItem = items[0];
+                    const foundPath = firstItem &&
+                        typeof firstItem === "object" &&
+                        !Array.isArray(firstItem)
+                        ? firstItem.path
+                        : null;
+                    if (typeof foundPath === "string" && nodePath.win32.isAbsolute(foundPath)) {
+                        const continuationNames = new Set([
+                            "file_list_files",
+                            "file_read_file",
+                            "file_exists",
+                        ]);
+                        const continuationTools = this.aiFileTools.filter((tool) => continuationNames.has(tool.function?.name ?? ""));
+                        if (continuationTools.length > 0) {
+                            try {
+                                const decisionAfterSearch = await this.aiPlanner.plan({
+                                    instruction: [
+                                        "Continue the remaining parts of the original user request.",
+                                        `Original user request: ${userInput}`,
+                                        "The requested file search has already completed successfully.",
+                                        `Verified search result: ${JSON.stringify({ path: foundPath })}`,
+                                        "Do not repeat the search or claim to have read contents yet.",
+                                        "Use an available read-only tool on this exact verified path ONLY if the original request requires further information about it.",
+                                        "Otherwise return a conversational reply without a tool action.",
+                                    ].join("\n"),
+                                    history: this.messages.slice(0, -1).filter((message) => message.role === "user" || message.role === "assistant"),
+                                    tools: continuationTools,
+                                    taskContext: this.aiTaskContext.getContextForPlanner(),
+                                });
+                                if (decisionAfterSearch.kind === "plan" &&
+                                    decisionAfterSearch.steps.length === 1) {
+                                    const nextStep = decisionAfterSearch.steps[0];
+                                    const nextPath = nextStep.arguments.path;
+                                    const sameVerifiedPath = typeof nextPath === "string" &&
+                                        nodePath.win32.isAbsolute(nextPath) &&
+                                        canonical(nextPath) === canonical(foundPath);
+                                    if (continuationNames.has(nextStep.toolName) &&
+                                        sameVerifiedPath) {
+                                        const followUpValidation = validatePlan(decisionAfterSearch, continuationTools);
+                                        if (followUpValidation.valid) {
+                                            const nextPlan = {
+                                                kind: "plan",
+                                                goal: decisionAfterSearch.goal,
+                                                steps: followUpValidation.plan.steps.map((step) => ({
+                                                    id: step.id,
+                                                    toolName: step.toolName,
+                                                    arguments: { ...step.arguments },
+                                                    dependsOn: [...step.dependsOn],
+                                                })),
+                                            };
+                                            // The second step must still go through TaskRunner,
+                                            // Executor, PermissionManager, and the file-tool preflight.
+                                            // A zero budget prevents loops or duplicate operations.
+                                            return await this.executeAIFilePlan(nextPlan, userInput, 0);
+                                        }
+                                        console.warn("[NEXA File Follow-Up] Plan validation failed:", followUpValidation.message);
+                                    }
+                                    else {
+                                        console.warn("[NEXA File Follow-Up] Rejected non-read-only or unverified path.");
+                                    }
+                                }
+                            }
+                            catch (error) {
+                                // Discovery already succeeded. Do not erase that verified
+                                // result just because optional AI continuation was unavailable.
+                                console.warn("[NEXA File Follow-Up] Planner failed:", error);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Present exact operation results and recovery IDs; do not let a model
+        // paraphrase a failed write/delete as a successful one.
+        const readOnly = new Set(["file_list_files", "file_read_file", "file_exists", "file_search"]);
+        const mutating = decision.steps.some((step) => !readOnly.has(step.toolName));
+        if (mutating) {
+            const lines = outcome.results.map((result) => {
+                const data = result.data && typeof result.data === "object" && !Array.isArray(result.data)
+                    ? result.data
+                    : {};
+                const recovery = typeof data.recoveryId === "string"
+                    ? `\nRecovery ID: ${data.recoveryId}`
+                    : "";
+                return `${result.success ? "Completed" : "Failed"} [${result.toolName}]: ${result.message}${recovery}`;
+            });
+            if (!outcome.success) {
+                lines.push(`Task stopped: ${outcome.message}`);
+                if (outcome.completedSteps > 0) {
+                    lines.push("Earlier successful changes were not automatically rolled back.");
+                }
+            }
+            return lines.length ? lines.join("\n\n") : outcome.message;
+        }
+        // Search results are structured filesystem evidence; format their actual
+        // returned paths without asking a generative model to invent a summary.
+        if (outcome.success && outcome.results.length === 1 &&
+            outcome.results[0].toolName === "file_search") {
+            const data = outcome.results[0].data;
+            if (data && typeof data === "object" && !Array.isArray(data)) {
+                const details = data;
+                if (Array.isArray(details.items)) {
+                    const paths = details.items
+                        .filter((item) => !!item && typeof item === "object" &&
+                        typeof item.path === "string")
+                        .map((item) => item.path);
+                    const suffix = details.truncated === true
+                        ? "\nResults may be incomplete; narrow the search if needed."
+                        : "";
+                    return paths.length
+                        ? `Found ${paths.length} matching items:\n${paths.join("\n")}${suffix}`
+                        : `No matching items were found.${suffix}`;
+                }
+            }
+        }
+        return this.resultInterpreter.interpret({
+            userRequest: userInput,
+            run: outcome,
+            mode: "auto",
+        });
     }
     async run(userInput) {
         /*
@@ -867,6 +1214,59 @@ export class Agent {
             content: userInput,
         };
         this.messages.push(userMessage);
+        // A reply to a pending path confirmation is handled against the SAVED
+        // plan, not sent back to Planner as a fresh unrelated instruction.
+        if (this.pendingFileConfirmation.hasPending()) {
+            const followUp = await this.pendingFileConfirmation.resolve(userInput);
+            if (followUp.kind === "confirmed") {
+                const answer = await this.executeAIFilePlan(followUp.plan, followUp.originalInstruction);
+                return this.generatedPrivateFinalAnswer(answer);
+            }
+            if (followUp.kind !== "none") {
+                return this.generatedPrivateFinalAnswer(followUp.message);
+            }
+        }
+        // The previous planner may have asked a clarification WITHOUT producing
+        // a validated plan. Keep that question and its request across turns.
+        if (this.pendingPlannerClarification) {
+            const pending = this.pendingPlannerClarification;
+            if (Date.now() - pending.startedAt > this.plannerClarificationLifetimeMs) {
+                this.pendingPlannerClarification = null;
+                return this.generatedPrivateFinalAnswer("The earlier clarification expired. Please repeat your full request.");
+            }
+            let decision = "unclear";
+            try {
+                decision = await this.classifyPlannerClarificationReply(pending.originalInstruction, pending.question, userInput);
+            }
+            catch (error) {
+                console.warn("[NEXA Clarification] Classification failed:", error);
+                return this.generatedPrivateFinalAnswer("I couldn't verify your confirmation. No action was performed.\n" + pending.question);
+            }
+            if (decision === "cancel") {
+                this.pendingPlannerClarification = null;
+                return this.generatedPrivateFinalAnswer("Cancelled. No file action was performed.");
+            }
+            if (decision === "change") {
+                this.pendingPlannerClarification = null;
+                return this.generatedPrivateFinalAnswer("The earlier request was discarded. Please provide the complete updated instruction.");
+            }
+            if (decision === "unclear") {
+                return this.generatedPrivateFinalAnswer(pending.question);
+            }
+            // Accepted clarification is not approval to write/delete. The planner
+            // must still propose a tool, PlanValidator checks it, and Executor
+            // independently enforces allowed roots and mutating-action approval.
+            this.pendingPlannerClarification = null;
+            const clarifiedInstruction = [
+                pending.originalInstruction,
+                "The user confirmed this clarification without changing it:",
+                pending.question,
+                "Use the confirmed information to propose the requested tool action.",
+                "Do not ask the identical clarification again.",
+            ].join("\n");
+            const answer = await this.tryAIFilePlan(clarifiedInstruction, pending.question);
+            return this.generatedPrivateFinalAnswer(answer ?? "The planner did not select a file tool. No file action was performed.");
+        }
         /*
       
         ==========================================
@@ -1046,14 +1446,19 @@ For current computer state, use real tools.
     
         ==========================================
     
-    
         */
-        const multiStepFileAnswer = await this.tryFastMultiStepFileCommand(userInput);
-        if (multiStepFileAnswer !== null)
-            return multiStepFileAnswer;
-        const fastFileAnswer = await this.tryFastFileCommand(userInput);
-        if (fastFileAnswer !== null)
-            return fastFileAnswer;
+        // The central AI planner is evaluated before legacy file patterns.
+        // All registered file tools go through validation, preflight and permissions.
+        // Non-file requests retain the existing Gmail/Browser/terminal behavior.
+        const exclusivelyNonFileTask = !!toolRequirement &&
+            toolRequirement.toolNames.length > 0 &&
+            toolRequirement.toolNames.every((name) => !name.startsWith("file_"));
+        if (!resolvedGmailDraft && gmailCompose.kind === "none" && !exclusivelyNonFileTask) {
+            const aiResult = await this.tryAIFilePlan(userInput);
+            if (aiResult !== null) {
+                return this.generatedPrivateFinalAnswer(aiResult);
+            }
+        }
         const fastGmailAnswer = await this.tryFastGmailCommand(userInput);
         if (fastGmailAnswer !== null)
             return fastGmailAnswer;
@@ -1634,6 +2039,9 @@ Call the appropriate tool now.
         */
         this.gmailComposeManager
             .clear();
+        this.aiTaskContext.reset();
+        this.pendingFileConfirmation = new PendingFileConfirmation();
+        this.pendingPlannerClarification = null;
         /*
     
         Reset only short-term conversation.

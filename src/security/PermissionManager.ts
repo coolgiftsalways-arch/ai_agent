@@ -1,342 +1,199 @@
-export type PermissionLevel =
-  | "safe"
-  | "confirm"
-  | "blocked";
+/**
+ * NEXA — permission gate for executable tools.
+ *
+ * Authorization happens inside Executor, after the tool request has been
+ * validated and mapped. This module does not interpret natural language.
+ */
 
+export type PermissionLevel = "safe" | "confirm" | "blocked";
 
-type ApprovalFunction = (
-  message: string
-) => Promise<boolean>;
+type ApprovalFunction = (message: string) => Promise<boolean>;
 
+/**
+ * These operations must not silently become "safe" through a settings
+ * mistake. Explicit blocking is still supported.
+ */
+const REQUIRE_CONFIRM = new Set<string>([
+  "file.writeFile",
+  "file.editFile",
+  "file.renameFile",
+  "file.moveFile",
+  "file.copyFile",
+  "file.copyFolder",
+  "file.deleteFile",
+  "file.deleteFolder",
+  "file.restoreFile",
+  "terminal.run",
+  "memory.forget",
+  "memory.clearAll",
+  "gmail.send",
+  "whatsapp.send",
+]);
+
+function printable(value: unknown): string {
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
+function excerpt(value: unknown, limit = 240): string {
+  const result = printable(value);
+  return result.length <= limit
+    ? result
+    : `${result.slice(0, limit)}… (${result.length} characters total)`;
+}
 
 export class PermissionManager {
-  private approvalFunction?: ApprovalFunction;
+  private readonly approvalFunction?: ApprovalFunction;
 
+  private permissions: Record<string, PermissionLevel> = {
+    // File: non-destructive reads and creations.
+    "file.readFile": "safe",
+    "file.listFiles": "safe",
+    "file.fileExists": "safe",
+    "file.searchFiles": "safe",
+    "file.createFile": "safe",
+    "file.createFolder": "safe",
 
-  private permissions: Record<
-    string,
-    PermissionLevel
-  > = {
-    /*
-    ==========================================
-    FILE
-    ==========================================
-    */
+    // File: mutation, copy, and recovery actions.
+    "file.writeFile": "confirm",
+    "file.editFile": "confirm",
+    "file.renameFile": "confirm",
+    "file.moveFile": "confirm",
+    "file.copyFile": "confirm",
+    "file.copyFolder": "confirm",
+    "file.deleteFile": "confirm",
+    "file.deleteFolder": "confirm",
+    "file.restoreFile": "confirm",
 
-    "file.readFile":
-      "safe",
-
-    "file.listFiles":
-      "safe",
-
-    "file.fileExists":
-      "safe",
-
-    "file.createFile":
-      "safe",
-
-    "file.createFolder":
-      "safe",
-
-    "file.writeFile":
-      "confirm",
-
-    "file.renameFile":
-      "confirm",
-
-    "file.moveFile":
-      "confirm",
-
-    "file.deleteFile":
-      "confirm",
-
-    "file.deleteFolder":
-      "confirm",
-
-
-    /*
-    ==========================================
-    TERMINAL
-    ==========================================
-    */
-
-    "terminal.run":
-      "confirm",
-
-
-    /*
-    ==========================================
-    MEMORY
-    ==========================================
-    */
-
-    "memory.remember":
-      "safe",
-
-    "memory.search":
-      "safe",
-
-    "memory.recent":
-      "safe",
-
-    "memory.forget":
-      "confirm",
-
-    "memory.clearAll":
-      "confirm",
-
-
-    /*
-    ==========================================
-    GMAIL
-    ==========================================
-    */
-
-    "gmail.recent":
-      "safe",
-
-    "gmail.search":
-      "safe",
-
-    "gmail.read":
-      "safe",
-
-    /*
-    IMPORTANT:
-
-    Sending email is NEVER automatic.
-
-    Every real email send must pass through
-    the approval function first.
-    */
-
-    "gmail.send":
-      "confirm",
-
-
-    /*
-    ==========================================
-    FUTURE WHATSAPP
-    ==========================================
-    */
-
-    "whatsapp.read":
-      "safe",
-
-    "whatsapp.send":
-      "confirm",
+    // Existing tools: preserved.
+    "terminal.run": "confirm",
+    "memory.remember": "safe",
+    "memory.search": "safe",
+    "memory.recent": "safe",
+    "memory.forget": "confirm",
+    "memory.clearAll": "confirm",
+    "gmail.recent": "safe",
+    "gmail.search": "safe",
+    "gmail.read": "safe",
+    "gmail.send": "confirm",
+    "whatsapp.read": "safe",
+    "whatsapp.send": "confirm",
   };
 
-
-  constructor(
-    approvalFunction?: ApprovalFunction
-  ) {
-    this.approvalFunction =
-      approvalFunction;
+  constructor(approvalFunction?: ApprovalFunction) {
+    this.approvalFunction = approvalFunction;
   }
-
-
-  /*
-  ==========================================
-  BUILD APPROVAL MESSAGE
-  ==========================================
-
-  For sensitive actions such as Gmail send,
-  show useful details before asking the user
-  to approve the action.
-  ==========================================
-  */
 
   private buildApprovalMessage(
     permissionKey: string,
-    parameters?: Record<
-      string,
-      unknown
-    >
+    parameters?: Record<string, unknown>
   ): string {
-    /*
-    ========================================
-    GMAIL SEND
-    ========================================
-    */
+    const args = parameters ?? {};
 
-    if (
-      permissionKey ===
-      "gmail.send"
-    ) {
-      const to =
-        String(
-          parameters?.to ??
-          ""
-        );
-
-      const subject =
-        String(
-          parameters?.subject ??
-          ""
-        );
-
-      const body =
-        String(
-          parameters?.body ??
-          ""
-        );
-
-
+    if (permissionKey === "gmail.send") {
+      // Preserve complete Gmail preview so the user can inspect the message.
       return [
-        "⚠️ Gmail send approval required",
-        "",
-        `To: ${to}`,
-        `Subject: ${subject}`,
+        "Gmail send approval required",
+        `To: ${printable(args.to)}`,
+        `Subject: ${printable(args.subject)}`,
         "",
         "Message:",
-        body,
+        printable(args.body),
         "",
         "Send this email?",
-      ].join(
-        "\n"
-      );
+      ].join("\n");
     }
 
+    if (permissionKey.startsWith("file.")) {
+      const parts = [
+        "NEXA FILE ACTION — approval required",
+        `Action: ${permissionKey}`,
+      ];
 
-    /*
-    ========================================
-    DEFAULT CONFIRMATION
-    ========================================
-    */
+      if (typeof args.path === "string") {
+        parts.push(`Path: ${args.path}`);
+      }
+      if (typeof args.oldPath === "string") {
+        parts.push(`Source: ${args.oldPath}`);
+      }
+      if (typeof args.newPath === "string") {
+        parts.push(`Destination: ${args.newPath}`);
+      }
+      if (typeof args.recoveryId === "string") {
+        parts.push(`Recovery ID: ${args.recoveryId}`);
+      }
 
-    const details =
-      parameters
-        ? JSON.stringify(
-            parameters,
-            null,
-            2
-          )
-        : "";
+      if (permissionKey === "file.writeFile") {
+        parts.push(
+          "WARNING: Replaces the file's entire contents.",
+          `New content: ${excerpt(args.content)}`
+        );
+      }
+      if (permissionKey === "file.editFile") {
+        parts.push(
+          `Find exact text: ${excerpt(args.search)}`,
+          `Replace with: ${excerpt(args.replacement)}`,
+          `Replace every occurrence: ${args.replaceAll === true ? "Yes" : "No"}`
+        );
+      }
+      if (permissionKey === "file.deleteFile" ||
+          permissionKey === "file.deleteFolder") {
+        parts.push("WARNING: This removes the item from its current location.");
+        if (permissionKey === "file.deleteFolder") {
+          parts.push("The folder and its contents may be affected.");
+        }
+      }
+      if (permissionKey === "file.restoreFile") {
+        parts.push("WARNING: Restoring may change the current filesystem state.");
+      }
 
+      parts.push("", "Approve this specific file action?");
+      return parts.join("\n");
+    }
 
+    // For terminal and other actions, show the complete request for review.
+    const details = parameters ? JSON.stringify(parameters, null, 2) : "";
     return [
       "Allow action?",
-      "",
       permissionKey,
-      "",
       details,
-    ]
-      .filter(
-        (value) =>
-          value !== ""
-      )
-      .join(
-        "\n"
-      );
+    ].filter(Boolean).join("\n\n");
   }
-
-
-  /*
-  ==========================================
-  AUTHORIZE ACTION
-  ==========================================
-  */
 
   async authorize(
     tool: string,
     action: string,
-    parameters?: Record<
-      string,
-      unknown
-    >
+    parameters?: Record<string, unknown>
   ): Promise<boolean> {
-    const permissionKey =
-      `${tool}.${action}`;
+    const permissionKey = `${tool}.${action}`;
+    const configuredLevel = this.permissions[permissionKey] ?? "confirm";
+    const level: PermissionLevel =
+      configuredLevel === "safe" && REQUIRE_CONFIRM.has(permissionKey)
+        ? "confirm"
+        : configuredLevel;
 
+    if (level === "safe") return true;
 
-    const level =
-      this.permissions[
-        permissionKey
-      ] ??
-      "confirm";
-
-
-    /*
-    ==========================================
-    SAFE
-    ==========================================
-    */
-
-    if (
-      level ===
-      "safe"
-    ) {
-      return true;
-    }
-
-
-    /*
-    ==========================================
-    BLOCKED
-    ==========================================
-    */
-
-    if (
-      level ===
-      "blocked"
-    ) {
-      console.log(
-        `🚫 BLOCKED: ${permissionKey}`
-      );
-
+    if (level === "blocked") {
+      console.log(`Blocked: ${permissionKey}`);
       return false;
     }
 
-
-    /*
-    ==========================================
-    CONFIRM REQUIRED
-    ==========================================
-    */
-
-    if (
-      !this.approvalFunction
-    ) {
-      console.log(
-        `⚠️ Approval required: ${permissionKey}`
-      );
-
+    if (!this.approvalFunction) {
+      console.log(`Approval required: ${permissionKey}`);
       return false;
     }
 
-
-    const approvalMessage =
-      this.buildApprovalMessage(
-        permissionKey,
-        parameters
-      );
-
-
-    /*
-    The real action will ONLY continue if
-    the user explicitly approves it.
-    */
-
-    return await this.approvalFunction(
-      approvalMessage
-    );
+    const message = this.buildApprovalMessage(permissionKey, parameters);
+    try {
+      return (await this.approvalFunction(message)) === true;
+    } catch (error) {
+      console.error(`Approval failed for ${permissionKey}:`, error);
+      return false;
+    }
   }
 
-
-  /*
-  ==========================================
-  CHANGE PERMISSION
-  ==========================================
-  */
-
-  setPermission(
-    tool: string,
-    action: string,
-    level: PermissionLevel
-  ) {
-    this.permissions[
-      `${tool}.${action}`
-    ] = level;
+  /** Existing settings API; critical actions always require confirmation. */
+  setPermission(tool: string, action: string, level: PermissionLevel): void {
+    this.permissions[`${tool}.${action}`] = level;
   }
 }

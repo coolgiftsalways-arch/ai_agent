@@ -204,6 +204,131 @@ export const agentTools = [
     },
     /*
     ==========================================
+    EXTENDED FILE TOOLS
+    ==========================================
+    */
+    {
+        type: "function",
+        function: {
+            name: "file_edit_file",
+            description: "Precisely edit an existing text file by replacing an exact text passage. " +
+                "Use instead of file_write_file when only part of a file should change. " +
+                "The passage must exist exactly. Creates a recoverable backup. Requires approval.",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "Full absolute Windows path of the existing file to edit.",
+                    },
+                    search: {
+                        type: "string",
+                        description: "Exact existing text to replace, copied from verified file content. Must not be empty.",
+                    },
+                    replacement: {
+                        type: "string",
+                        description: "Exact replacement text. An empty string removes the matched passage.",
+                    },
+                    replaceAll: {
+                        type: "boolean",
+                        description: "Whether to replace every match. Default false; multiple matches are rejected otherwise.",
+                    },
+                },
+                required: ["path", "search", "replacement"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "file_search",
+            description: "Search recursively for files or folders whose names contain a query. " +
+                "Returns actual matching paths; does not search file contents or follow symbolic links.",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "Absolute Windows directory path to search inside.",
+                    },
+                    query: {
+                        type: "string",
+                        description: "Non-empty filename or folder-name text to look for.",
+                    },
+                    maxResults: {
+                        type: "number",
+                        description: "Optional maximum results from 1 through 100; default 100.",
+                    },
+                },
+                required: ["path", "query"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "file_copy_file",
+            description: "Copy a regular file to a new destination, leaving the original unchanged. " +
+                "The destination must not already exist.",
+            parameters: {
+                type: "object",
+                properties: {
+                    oldPath: {
+                        type: "string",
+                        description: "Absolute Windows path of the existing source file.",
+                    },
+                    newPath: {
+                        type: "string",
+                        description: "Absolute Windows path of the new destination file.",
+                    },
+                },
+                required: ["oldPath", "newPath"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "file_copy_folder",
+            description: "Copy a folder and its supported contents to a new destination. " +
+                "The destination must not already exist. Does not follow symbolic links.",
+            parameters: {
+                type: "object",
+                properties: {
+                    oldPath: {
+                        type: "string",
+                        description: "Absolute Windows path of the existing source folder.",
+                    },
+                    newPath: {
+                        type: "string",
+                        description: "Absolute Windows path of the new destination folder.",
+                    },
+                },
+                required: ["oldPath", "newPath"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "file_restore",
+            description: "Restore a deleted item, previous file version, or undo a move using a " +
+                "recovery ID returned by a successful NEXA file operation. " +
+                "Never invent recovery IDs. Requires approval.",
+            parameters: {
+                type: "object",
+                properties: {
+                    recoveryId: {
+                        type: "string",
+                        description: "Exact recovery ID from a verified prior file tool result.",
+                    },
+                },
+                required: ["recoveryId"],
+            },
+        },
+    },
+    /*
+    ==========================================
     TERMINAL TOOL
     ==========================================
     */
@@ -482,6 +607,36 @@ export function mapNativeToolCall(name, args) {
         TERMINAL
         ========================================
         */
+        case "file_edit_file":
+            return {
+                tool: "file",
+                action: "editFile",
+                parameters: args,
+            };
+        case "file_search":
+            return {
+                tool: "file",
+                action: "searchFiles",
+                parameters: args,
+            };
+        case "file_copy_file":
+            return {
+                tool: "file",
+                action: "copyFile",
+                parameters: args,
+            };
+        case "file_copy_folder":
+            return {
+                tool: "file",
+                action: "copyFolder",
+                parameters: args,
+            };
+        case "file_restore":
+            return {
+                tool: "file",
+                action: "restoreFile",
+                parameters: args,
+            };
         case "terminal_run":
             return {
                 tool: "terminal",
