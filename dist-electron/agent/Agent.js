@@ -39,6 +39,10 @@ export class Agent {
     // Expose every registered native file action to the AI planner.
     // This is a TOOL policy, not natural-language sentence matching.
     aiFileTools = allAgentTools.filter((tool) => tool.function?.name?.startsWith("file_") === true);
+    // Read-only Gmail actions are available to the SAME AI planner as file
+    // actions. This prevents a request to search email from being treated as
+    // a request to search C:\Users or another filesystem path.
+    aiReadOnlyGmailTools = allAgentTools.filter((tool) => ["gmail_recent", "gmail_search", "gmail_read"].includes(tool.function?.name ?? ""));
     messages;
     memoryManager;
     gmailComposeManager;
@@ -856,17 +860,55 @@ export class Agent {
         return value === "confirm" || value === "cancel" ||
             value === "change" || value === "unclear" ? value : "unclear";
     }
+    /**
+     * Execute only read-only Gmail proposals using the existing verified tool
+     * definitions, validator and Executor. Sending mail is deliberately absent.
+     * No Gmail payload is added to long-term memory.
+     */
+    async executeAIReadOnlyGmailPlan(decision, userInput) {
+        const permitted = new Set(["gmail_recent", "gmail_search", "gmail_read"]);
+        if (decision.steps.length !== 1) {
+            return "This Gmail request needs a tool result before the next action can be planned. " +
+                "Please ask for one Gmail search or read at a time. No action was executed.";
+        }
+        const step = decision.steps[0];
+        if (!permitted.has(step.toolName)) {
+            return "Unsupported Gmail action. No action was executed.";
+        }
+        const validation = validateAgentToolCall(step.toolName, step.arguments);
+        if (!validation.success) {
+            return `Gmail tool parameters rejected: ${validation.message}. No action was performed.`;
+        }
+        const request = mapAgentToolCall(step.toolName, validation.args);
+        if (!request || request.tool !== "gmail" ||
+            !["recent", "search", "read"].includes(request.action)) {
+            return "Gmail tool routing failed. No action was performed.";
+        }
+        console.log("[NEXA Gmail AI]", step.toolName, "Arguments:", JSON.stringify(validation.args, null, 2));
+        const result = await this.executor.execute(request);
+        if (!result.success) {
+            return this.isPermissionDenied(result)
+                ? "Permission denied. Gmail was not accessed."
+                : `Gmail request failed: ${String(result.message ?? "Unknown error")}`;
+        }
+        const formatted = this.formatDirectGmailResult(step.toolName, result, userInput);
+        return formatted ?? "Gmail succeeded but returned an unexpected response format.";
+    }
     async tryAIFilePlan(userInput, confirmedQuestion) {
         const decision = await this.aiPlanner.plan({
             instruction: userInput,
             history: this.messages.slice(0, -1).filter((message) => message.role === "user" || message.role === "assistant"),
-            tools: this.aiFileTools,
+            tools: [...this.aiFileTools, ...this.aiReadOnlyGmailTools],
             taskContext: [
                 this.aiTaskContext.getContextForPlanner(),
                 "Trusted discovery roots for file_search: " + this.fileDiscoveryRoots.join(", "),
                 "A folder mentioned only by name can be discovered within an authorized root. " +
                     "Search results become trusted paths only after a tool verifies them. " +
                     "Normal path confirmation, permission checks and preflight still apply.",
+                "For the user's actual Gmail account, use gmail_recent, gmail_search or gmail_read. " +
+                    "Never use file_search, file_list_files or any other filesystem tool for an email request. " +
+                    "Gmail data is not stored at a Windows path. Gmail searches require a Gmail search query, " +
+                    "not a Windows directory.",
             ].join("\n"),
         });
         if (decision.kind === "error") {
@@ -896,6 +938,15 @@ export class Agent {
                 startedAt: Date.now(),
             };
             return decision.question;
+        }
+        // A read-only Gmail proposal is executed with the Gmail validator and
+        // Executor, never with FileTool or filesystem path confirmation.
+        const proposedGmailSteps = decision.steps.filter((step) => step.toolName.startsWith("gmail_"));
+        if (proposedGmailSteps.length > 0) {
+            if (proposedGmailSteps.length !== decision.steps.length) {
+                return "The planner mixed Gmail and file operations. No action was performed.";
+            }
+            return this.executeAIReadOnlyGmailPlan(decision, userInput);
         }
         // Validate EVERY step and its concrete arguments BEFORE any work begins.
         // PlanValidator holds the canonical file-tool path policy for all 15 actions.
@@ -1453,7 +1504,14 @@ For current computer state, use real tools.
         const exclusivelyNonFileTask = !!toolRequirement &&
             toolRequirement.toolNames.length > 0 &&
             toolRequirement.toolNames.every((name) => !name.startsWith("file_"));
-        if (!resolvedGmailDraft && gmailCompose.kind === "none" && !exclusivelyNonFileTask) {
+        // A Gmail read/search should reach the shared AI planner even when the
+        // legacy detector recognizes it as a non-file task. Other non-file tasks
+        // retain their previous workflow; sending email still requires approval.
+        const isReadOnlyGmailRequirement = !!toolRequirement &&
+            toolRequirement.toolNames.length > 0 &&
+            toolRequirement.toolNames.every((name) => ["gmail_recent", "gmail_search", "gmail_read"].includes(name));
+        if (!resolvedGmailDraft && gmailCompose.kind === "none" &&
+            (!exclusivelyNonFileTask || isReadOnlyGmailRequirement)) {
             const aiResult = await this.tryAIFilePlan(userInput);
             if (aiResult !== null) {
                 return this.generatedPrivateFinalAnswer(aiResult);
